@@ -1,0 +1,82 @@
+import AppearanceSelector from "./AppearanceSelector";
+import BrandLogo from "./BrandLogo";
+import { api, resetMediaSession } from "../services/api";
+import Notifications from "./Notifications";
+import { useEffect, useState } from "react";
+import { NavLink, useNavigate } from "react-router-dom";
+import {
+  Bell, ChevronDown, Clapperboard, LayoutDashboard, LogOut,
+  Menu, Settings, Sparkles, Users, WandSparkles, Youtube,
+} from "lucide-react";
+
+const links = [
+  ["/", "Dashboard", LayoutDashboard],
+  ["/channels", "My Channels", Youtube],
+  ["/library", "Media Library", Clapperboard],
+  ["/title-to-short", "Create Short", WandSparkles],
+  ["/videos", "My Videos", Clapperboard],
+  ["/uploads", "Upload History", Youtube],
+  ["/account", "Account Settings", Settings],
+  ["/team", "Admin Panel", Users],
+];
+
+export function Shell({ user, children }) {
+  const navigate = useNavigate();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [configuration, setConfiguration] = useState(null);
+  const [workspace,setWorkspace] = useState(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = event => { if (event.key === 'Escape') setMenuOpen(false); };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [menuOpen]);
+  useEffect(() => {
+    let live = true;
+    const load = () => api('/settings').then(data => { if (live) {setConfiguration(data.active_configuration);setWorkspace(data.workspace);} }).catch(() => { if (live) setConfiguration(null); });
+    load();
+    window.addEventListener('focus', load);
+    const timer = setInterval(load, 30000);
+    return () => { live = false; clearInterval(timer); window.removeEventListener('focus', load); };
+  }, []);
+  const providerLabel = !configuration ? 'Provider status unavailable' :
+    configuration.gemini_configured ? (configuration.research_provider === 'rss' ? 'Gemini + live RSS' : 'Gemini + demo research') :
+    configuration.research_provider === 'rss' ? 'Live RSS / AI not configured' : 'Development providers';
+  const [role,setRole] = useState(localStorage.getItem("role") || "MEMBER");
+  useEffect(()=>{let live=true;const refresh=()=>api('/auth/me').then(me=>{if(live){localStorage.setItem('role',me.role);setRole(me.role);}}).catch(()=>{});refresh();const timer=setInterval(refresh,10000);window.addEventListener('focus',refresh);return()=>{live=false;clearInterval(timer);window.removeEventListener('focus',refresh);};},[]);
+  const logout = async () => {
+    try { await api("/auth/logout",{method:"POST"}); } catch {}
+    resetMediaSession();
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    localStorage.removeItem("role");
+    navigate("/login");
+  };
+  return (
+    <div className="app-shell">
+      <aside className={`sidebar ${menuOpen ? "mobile-open" : ""}`}>
+        <div className="brand"><BrandLogo compact /></div>
+        <div className="workspace-picker"><span className="workspace-logo">{workspace?.name?.slice(0,1).toUpperCase() || 'W'}</span><span className="workspace-name">{workspace?.name || 'Loading workspace…'}<small>Workspace</small></span><ChevronDown size={15} /></div>
+        <div className="nav-label">WORKSPACE</div>
+        <nav aria-label="Workspace navigation">{links.filter(([to]) => (to !== "/team" || ["OWNER","ADMIN"].includes(role)) && (!["/create","/title-to-short"].includes(to) || role !== "VIEWER")).map(([to, label, Icon]) => <NavLink key={to} aria-label={label} title={label} to={to} onClick={() => setMenuOpen(false)} end={to === "/"} className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}><Icon size={17} /><span>{to === "/channels" && role !== "OWNER" ? "My Channels" : label}</span></NavLink>)}</nav>
+        <div className="sidebar-bottom">
+          {["OWNER","ADMIN"].includes(role)&&<div className="upgrade-card"><span className="upgrade-icon"><Sparkles size={16} /></span><strong>Make more with AI</strong><p>{!configuration ? 'Checking provider configuration.' : configuration.gemini_configured ? 'Gemini is configured for custom scripts.' : 'Connect your AI provider to unlock custom scripts.'}</p><button onClick={() => navigate("/settings")}>Explore settings <span>↗</span></button></div>}
+          <div className="profile"><div className="avatar">{(user?.name || "D").slice(0, 1).toUpperCase()}</div><div className="profile-copy"><strong>{user?.name || "Demo Owner"}</strong><small>{role}</small></div><button className="icon-button" title="Sign out" onClick={logout}><LogOut size={16} /></button></div>
+        </div>
+      </aside>
+      <main className="main-area">
+        <header className="topbar"><button className="mobile-menu icon-button" aria-label="Toggle navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><Menu size={18} /></button><div className="crumb">Workspace <span>/</span> <strong>Studio</strong></div><div className="topbar-actions"><span className="plan-chip"><span className="status-dot" /> {providerLabel}</span><AppearanceSelector /><Notifications /><div className="small-avatar">{(user?.name || "D").slice(0, 1).toUpperCase()}</div><span className="topbar-user">{user?.name || "Demo Owner"}</span></div></header>
+        <div className="page-content">{children}</div>
+      </main>
+    </div>
+  );
+}
+
+export function PageHeader({ eyebrow, title, description, action }) {
+  return <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{action}</div>;
+}
+
+export function EmptyState({ title, detail, action }) {
+  return <div className="empty-state"><div className="empty-icon"><Clapperboard size={22} /></div><strong>{title}</strong><p>{detail}</p>{action}</div>;
+}
+

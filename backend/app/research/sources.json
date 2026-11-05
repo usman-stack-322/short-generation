@@ -1,0 +1,295 @@
+{
+  "sources": [
+    {
+      "hosts": [
+        "bbc.com",
+        "bbc.co.uk"
+      ],
+      "category": "major_news",
+      "publisher_group": "bbc",
+      "verified_identity": true,
+      "reliability": 0.93,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "reuters.com"
+      ],
+      "category": "major_news",
+      "publisher_group": "reuters",
+      "verified_identity": true,
+      "reliability": 0.96,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "apnews.com"
+      ],
+      "category": "major_news",
+      "publisher_group": "associated press",
+      "verified_identity": true,
+      "reliability": 0.96,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "theguardian.com"
+      ],
+      "category": "major_news",
+      "publisher_group": "guardian",
+      "verified_identity": true,
+      "reliability": 0.87,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "espn.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "espn",
+      "verified_identity": true,
+      "reliability": 0.85,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "skysports.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "sky",
+      "verified_identity": true,
+      "reliability": 0.87,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "uefa.com"
+      ],
+      "category": "official_primary",
+      "publisher_group": "uefa",
+      "verified_identity": true,
+      "reliability": 0.94,
+      "primary_paths": [
+        "/"
+      ],
+      "authoritative_for": [
+        "match_result",
+        "fixture",
+        "statistics",
+        "award",
+        "club_announcement"
+      ]
+    },
+    {
+      "hosts": [
+        "fifa.com"
+      ],
+      "category": "official_primary",
+      "publisher_group": "fifa",
+      "verified_identity": true,
+      "reliability": 0.94,
+      "primary_paths": [
+        "/"
+      ],
+      "authoritative_for": [
+        "match_result",
+        "fixture",
+        "statistics",
+        "award",
+        "club_announcement"
+      ]
+    },
+    {
+      "hosts": [
+        "manutd.com"
+      ],
+      "category": "official_primary",
+      "publisher_group": "manutd",
+      "verified_identity": true,
+      "reliability": 0.92,
+      "primary_paths": [
+        "/"
+      ],
+      "authoritative_for": [
+        "match_result",
+        "fixture",
+        "statistics",
+        "award",
+        "club_announcement"
+      ]
+    },
+    {
+      "hosts": [
+        "realmadrid.com"
+      ],
+      "category": "official_primary",
+      "publisher_group": "realmadrid",
+      "verified_identity": true,
+      "reliability": 0.92,
+      "primary_paths": [
+        "/"
+      ],
+      "authoritative_for": [
+        "match_result",
+        "fixture",
+        "statistics",
+        "award",
+        "club_announcement"
+      ]
+    },
+    {
+      "hosts": [
+        "alnassr.sa"
+      ],
+      "category": "official_primary",
+      "publisher_group": "alnassr",
+      "verified_identity": true,
+      "reliability": 0.92,
+      "primary_paths": [
+        "/"
+      ],
+      "authoritative_for": [
+        "match_result",
+        "fixture",
+        "statistics",
+        "award",
+        "club_announcement"
+      ]
+    },
+    {
+      "hosts": [
+        "thenationalnews.com"
+      ],
+      "category": "major_news",
+      "publisher_group": "the-national-imi",
+      "verified_identity": true,
+      "reliability": 0.88,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "goal.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "goal-footballco",
+      "verified_identity": true,
+      "reliability": 0.83,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "nba.com"
+      ],
+      "category": "official_primary",
+      "publisher_group": "nba",
+      "verified_identity": true,
+      "reliability": 0.94,
+      "primary_paths": [
+        "/"
+      ],
+      "authoritative_for": [
+        "match_result",
+        "fixture",
+        "statistics",
+        "award",
+        "club_announcement"
+      ]
+    },
+    {
+      "hosts": [
+        "inquirer.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "philadelphia_inquirer",
+      "verified_identity": true,
+      "reliability": 0.86,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "awfulannouncing.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "comeback_media",
+      "verified_identity": true,
+      "reliability": 0.82,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "bet.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "paramount",
+      "verified_identity": true,
+      "reliability": 0.82,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "vibe.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "penske_media",
+      "verified_identity": true,
+      "reliability": 0.8,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "profootballnetwork.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "pro_football_network",
+      "verified_identity": true,
+      "reliability": 0.78,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "sportingnews.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "sporting_news",
+      "verified_identity": true,
+      "reliability": 0.83,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "sports.yahoo.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "yahoo_syndication_unknown",
+      "verified_identity": true,
+      "reliability": 0.8,
+      "primary_paths": [],
+      "authoritative_for": []
+    },
+    {
+      "hosts": [
+        "pantherswire.usatoday.com"
+      ],
+      "category": "specialist_news",
+      "publisher_group": "usa_today",
+      "verified_identity": true,
+      "reliability": 0.84,
+      "primary_paths": [],
+      "authoritative_for": []
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+import LanguageSelect from "../components/LanguageSelect";
+import { useEffect, useState } from "react";
+import { Plus, Sparkles, WandSparkles } from "lucide-react";
+import { api } from "../services/api";
+import { EmptyState, PageHeader } from "../components/Shell";
+import { Button, Modal, Notice } from "../components/UI";
+
+const emptyForm = { name: "", category: "", description: "", keywords: "", research_keywords: "", tone: "Energetic documentary/news style", preferred_language: "en-US", default_duration: 45, default_voice: "en-US", channel_id: "", enabled: true };
+
+export default function Personalities() {
+  const [sharing,setSharing]=useState(null),[shareChannel,setShareChannel]=useState("");
+  async function share(event){event.preventDefault();try{await api(`/personalities/${sharing.id}/share`,{method:"PATCH",body:JSON.stringify({channel_id:shareChannel})});setSharing(null);await load();}catch(err){setError(err.message);}}
+  const [rows, setRows] = useState([]);
+  const [channels, setChannels] = useState([]);
+  const [show, setShow] = useState(false);
+  const [form, setForm] = useState(emptyForm);
+  const [error, setError] = useState("");
+  async function load() {
+    try { const [personalities, channelData] = await Promise.all([api("/personalities"), api("/channels")]); setRows(personalities); setChannels(channelData); }
+    catch (err) { setError(err.message); }
+  }
+  useEffect(() => { load(); }, []);
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api("/personalities", { method: "POST", body: JSON.stringify({ ...form, keywords: form.keywords.split(",").map((x) => x.trim()).filter(Boolean), research_keywords: form.research_keywords.split(",").map((x) => x.trim()).filter(Boolean), default_duration: Number(form.default_duration), channel_id: form.channel_id || null }) });
+      setShow(false); setForm(emptyForm); await load();
+    } catch (err) { setError(err.message); }
+  }
+  return <><PageHeader eyebrow="YOUR CREATIVE DIRECTION" title="Personalities" description="Give every channel a voice, a point of view, and a story to tell." action={localStorage.getItem("role") !== "VIEWER" && <Button onClick={() => setShow(true)}><Plus size={16} /> Add personality</Button>} /><Notice>{error}</Notice>{rows.length ? <div className="personality-cards">{rows.map((row, index) => <article className="personality-card panel" key={row.id}><div className="personality-card-head"><span className={`personality-avatar large tone-${index % 4}`}>{row.name.slice(0, 1)}</span><span className={`status-pill ${row.enabled ? "status-active" : "status-inactive"}`}><i />{row.enabled ? "Active" : "Paused"}</span></div><span className="category-tag">{row.category}</span><h2>{row.name}</h2><small>{row.visibility === "personal" ? "Private personality" : "Workspace personality"}</small>{localStorage.getItem("role") === "OWNER" && <Button variant="secondary" onClick={()=>{setSharing(row);setShareChannel(row.channel_id || channels[0]?.id || "");}}>Assign / share with channel</Button>}<p>{row.description || row.tone}</p><div className="tag-list">{row.keywords.slice(0, 4).map((keyword) => <span key={keyword}>{keyword}</span>)}</div><div className="personality-card-footer"><span><WandSparkles size={14} /> {row.default_duration}s · {row.preferred_language}</span><span>{channels.find((channel) => channel.id === row.channel_id)?.name || "Any channel"}</span></div></article>)}</div> : <section className="panel"><EmptyState title="No personalities yet" detail="Create a personality to make your scripts feel consistent and recognizable." action={localStorage.getItem("role") !== "VIEWER" && <Button onClick={() => setShow(true)}><Plus size={15} /> Add personality</Button>} /></section>}
+    {sharing && <Modal title="Share personality" onClose={()=>setSharing(null)}><form className="form-stack" onSubmit={share}><label>Authorized channel<select required value={shareChannel} onChange={e=>setShareChannel(e.target.value)}><option value="">Choose channel</option>{channels.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label><small>Only members authorized for this channel will see the shared personality.</small><Button type="submit">Save sharing</Button></form></Modal>}
+    {show && <Modal title="Create a personality" onClose={() => setShow(false)}><form className="form-stack" onSubmit={submit}><label>Name<input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Cristiano Ronaldo" /></label><div className="form-row"><label>Category<input required value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Football" /></label><label>Assign channel<select value={form.channel_id} onChange={(e) => setForm({ ...form, channel_id: e.target.value })}><option value="">Any channel</option>{channels.map((channel) => <option value={channel.id} key={channel.id}>{channel.name}</option>)}</select></label></div><label>Description<textarea rows="2" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Describe the perspective and audience for this theme." /></label><label>Keywords <span className="label-hint">Comma-separated</span><input value={form.keywords} onChange={(e) => setForm({ ...form, keywords: e.target.value })} placeholder="Ronaldo, CR7, football" /></label><label>Research keywords <span className="label-hint">Comma-separated</span><input value={form.research_keywords} onChange={(e) => setForm({ ...form, research_keywords: e.target.value })} placeholder="football, training, career" /></label><div className="form-row"><label>Tone<input value={form.tone} onChange={(e) => setForm({ ...form, tone: e.target.value })} /></label><label>Default duration<select value={form.default_duration} onChange={(e) => setForm({ ...form, default_duration: e.target.value })}><option value="30">30 seconds</option><option value="45">45 seconds</option><option value="60">60 seconds</option></select></label></div><div className="form-row"><LanguageSelect label="Preferred language" value={form.preferred_language} onChange={value => setForm({...form,preferred_language:value})}/><label>Default voice<select value={form.default_voice} onChange={e => setForm({...form, default_voice:e.target.value})}><option value="en-US">English narrator</option><option value="es-ES">Spanish narrator</option><option value="fr-FR">French narrator</option></select></label></div><label className="checkbox-label"><input type="checkbox" checked={form.enabled} onChange={e => setForm({...form, enabled:e.target.checked})} />Enable personality</label><Notice>{error}</Notice><div className="modal-actions"><Button type="button" variant="secondary" onClick={() => setShow(false)}>Cancel</Button><Button type="submit"><Sparkles size={15} /> Create personality</Button></div></form></Modal>}
+  </>;
+}

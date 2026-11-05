@@ -1,0 +1,32 @@
+import { useState } from 'react';
+import { usePollingResource } from '../hooks/usePollingResource';
+import { Link } from 'react-router-dom';
+import { api, mediaUrl } from '../services/api';
+import { PageHeader } from '../components/Shell';
+import { Button, Notice, Loading } from '../components/UI';
+
+const tabs=[['all','All'],['verification_required','Needs Research'],['generating','Generating'],['ready_for_review','Ready for Review'],['approved','Approved'],['scheduled','Scheduled'],['uploaded','Uploaded'],['failed','Failed'],['rejected','Rejected']];
+const generating=['researching','script_generation','collecting_assets','voice_generation','rendering','creating_cover','uploading'];
+const nextAction = row => ['verification_required','research_ready'].includes(row.status) ? 'Review research' : ['failed','upload_failed'].includes(row.status) ? 'Recover job' : generating.includes(row.status) ? 'View progress' : row.status==='ready_for_review' ? 'Review Short' : 'Open Short';
+export default function Videos(){
+  const {data,setData:setRows,error:pollError,loaded}=usePollingResource('/videos');
+  const rows=data || [];
+  const [error,setError]=useState(''),[status,setStatus]=useState('all'),[classification,setClassification]=useState('all');
+  const [channel,setChannel]=useState(''),[personality,setPersonality]=useState(''),[member,setMember]=useState(''),[date,setDate]=useState('');
+  const role=localStorage.getItem('role');
+  const options=key=>[...new Set(rows.map(row=>row[key]).filter(Boolean))];
+  const visible=rows.filter(row=>(classification==='all'||(classification==='test'?row.research_trace?.operator_is_test===true:row.research_trace?.operator_is_test!==true))&&(status==='all'||(status==='generating'?generating.includes(row.status):status==='verification_required'?['verification_required','research_ready'].includes(row.status):status==='failed'?['failed','upload_failed'].includes(row.status):row.status===status))&&(!channel||row.channel_name===channel)&&(!personality||row.personality_name===personality)&&(!member||row.member_name===member)&&(!date||row.created_at?.slice(0,10)===date));
+  const clearFilters=()=>{setStatus('all');setChannel('');setPersonality('');setMember('');setDate('');setClassification('all');};
+  async function remove(id){if(!window.confirm('Delete this local job and its media permanently?'))return;try{await api(`/videos/${id}`,{method:'DELETE'});setRows(old=>old.filter(row=>row.id!==id));}catch(err){setError(err.message);}}
+  return <><PageHeader eyebrow="CONTENT PIPELINE" title="Video queue" description="Research, generation, approval, scheduling, and upload history." action={role!=='VIEWER'&&<Link to="/create"><Button>Create a Short</Button></Link>}/><Notice>{error || pollError}</Notice>
+    {!loaded&&!pollError&&<Loading/>}
+    {!loaded&&pollError&&<p>Could not load the queue. Retrying automatically…</p>}
+    <div className="queue-tabs day2-tabs" role="tablist">{tabs.map(([key,label])=><button role="tab" aria-selected={status===key} key={key} className={status===key?'active':''} onClick={()=>setStatus(key)}>{label}</button>)}</div>
+    <div className="queue-filters"><label>Job label<select value={classification} onChange={e=>setClassification(e.target.value)}><option value="all">All jobs</option><option value="production">Not marked as test</option><option value="test">Explicitly marked test</option></select></label><label>Channel<select value={channel} onChange={e=>setChannel(e.target.value)}><option value="">All channels</option>{options('channel_name').map(v=><option key={v}>{v}</option>)}</select></label><label>Personality<select value={personality} onChange={e=>setPersonality(e.target.value)}><option value="">All personalities</option>{options('personality_name').map(v=><option key={v}>{v}</option>)}</select></label>{role==='OWNER'&&<label>Member<select value={member} onChange={e=>setMember(e.target.value)}><option value="">All members</option>{options('member_name').map(v=><option key={v}>{v}</option>)}</select></label>}<label>Created date (UTC)<input type="date" value={date} onChange={e=>setDate(e.target.value)}/></label></div>
+    {loaded&&!visible.length&&<section className="panel settings-section"><h2>{rows.length?'No videos match these filters.':'No videos yet.'}</h2><p>{rows.length?'Try another status or clear filters.':'Create a Short to start your queue.'}</p><Button variant="secondary" onClick={clearFilters}>Clear filters</Button></section>}
+    <div className="queue-list">{visible.map(row=><article key={row.id} className="queue-card panel"><img className="queue-thumb" src={mediaUrl(row.thumbnail_url)||'/cover-placeholder.svg'} alt="Video cover" onError={e=>{e.currentTarget.src='/cover-placeholder.svg';}}/><div className="queue-main"><div className="queue-topline"><span className={`status-pill status-${row.status}`}>{row.status.replaceAll('_',' ')}</span><span>{row.created_at&&new Date(row.created_at).toLocaleString()} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</span></div><h2>{row.seo?.title||row.topic||'Research in progress'}</h2><p>{row.channel_name} · {row.personality_name} · {row.duration}s · {row.language_name || row.language_code || row.language}</p>{generating.includes(row.status)&&<p>Working: {row.current_step.replaceAll('_',' ')}{row.upload&&` · ${Math.round(row.upload.progress*100)}%`}</p>}{row.upload?.scheduled_at&&<p>Scheduled: {new Date(row.upload.scheduled_at).toLocaleString()} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</p>}<p>Stage: {(row.current_step || row.status).replaceAll('_',' ')}</p>{row.error_message&&<details className="queue-error"><summary>Needs attention — open this job for recovery</summary>{row.error_message}</details>}{row.upload?.youtube_url&&<a href={row.upload.youtube_url} target="_blank" rel="noreferrer">YouTube ↗</a>}</div><div className="queue-actions">{role!=='VIEWER'&&<Button variant="secondary" onClick={async()=>{try{const updated=await api(`/videos/${row.id}/classification`,{method:'PATCH',body:JSON.stringify({is_test:!row.research_trace?.operator_is_test})});setRows(old=>old.map(r=>r.id===updated.id?updated:r));}catch(e){setError(e.message);}}}>{row.research_trace?.operator_is_test?'Unmark test':'Mark as test'}</Button>}<Link to={`/videos/${row.id}`} className="button button-secondary">{nextAction(row)}</Link>{role==='OWNER'&&!['uploaded','uploading','scheduled',...generating].includes(row.status)&&<Button variant="secondary" onClick={()=>remove(row.id)}>Delete</Button>}</div></article>)}</div>
+  </>;
+}
+
+
+

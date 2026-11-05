@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: ai-shorts-backend
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: DATABASE_URL
+        value: sqlite:///./ai_shorts.db
+      - key: GENERATED_DIR
+        value: /app/generated
+      - key: SEED_DEMO
+        value: "false"
+      - key: SCHEDULER_ENABLED
+        value: "true"
+      - key: YOUTUBE_UPLOADS_ENABLED
+        value: "false"
+      - key: TITLE_SHORT_TTS_PROVIDER
+        value: local
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
+

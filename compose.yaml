@@ -1,0 +1,18 @@
+services:
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: sqlite:////data/ai_shorts.db
+      GENERATED_DIR: /data/generated
+      YOUTUBE_UPLOADS_ENABLED: 'false'
+      SCHEDULER_ENABLED: 'false'
+      SEED_DEMO: 'false'
+      FRONTEND_ORIGIN: http://127.0.0.1:5173
+    ports: ['127.0.0.1:8000:8000']
+    volumes: ['pilot-data:/data']
+  frontend:
+    build: ./frontend
+    ports: ['127.0.0.1:5173:80']
+volumes:
+  pilot-data:

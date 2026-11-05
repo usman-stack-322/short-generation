@@ -1,0 +1,55 @@
+{
+  "backup": "C:\\Users\\ua589\\short generation\\backend\\backups\\handover-20261030T044449718843",
+  "removed_seed_job_ids": [
+    "c4f123c7-c03d-4ba4-bf9c-8ab44dee45d5"
+  ],
+  "cleared_simulated_channel_ids": [
+    "da1fd8aa-a657-43f4-a5a7-3e36b8087ca6"
+  ],
+  "generated_files_deleted": [],
+  "preserved": {
+    "users": 5,
+    "workspace_members": 5,
+    "workspace_settings": 1,
+    "scripts": 10,
+    "videos": 9,
+    "approvals": 1,
+    "title_short_drafts": 4,
+    "library_media": 0,
+    "channel_authorizations": 0
+  },
+  "remaining_channels": [
+    {
+      "id": "da1fd8aa-a657-43f4-a5a7-3e36b8087ca6",
+      "status": "disconnected",
+      "youtube_channel_id": null
+    },
+    {
+      "id": "19abc891-227e-499c-b1e8-f777851ccfb6",
+      "status": "demo",
+      "youtube_channel_id": null
+    },
+    {
+      "id": "19c03715-b5ab-401d-892f-90eba7174290",
+      "status": "demo",
+      "youtube_channel_id": null
+    },
+    {
+      "id": "b6a8897b-c7c7-4bf9-b917-cd74c4fd3b2a",
+      "status": "demo",
+      "youtube_channel_id": null
+    },
+    {
+      "id": "c55876c0-d2f3-467b-9fc4-b445a6d6b492",
+      "status": "demo",
+      "youtube_channel_id": null
+    },
+    {
+      "id": "7c6a91c7-1b7e-4d27-9fb7-cee30b1a8e37",
+      "status": "demo",
+      "youtube_channel_id": null
+    }
+  ],
+  "analytics_rows": 0,
+  "note": "Legacy demo-marked channels with real projects and all accounts preserved. No ambiguous projects or media removed. Backup includes secrets: keep local; exclude from shared release."
+}
