@@ -7,16 +7,20 @@ class InputModel(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
 
-class RegisterInput(InputModel):
-    name: str = Field(min_length=2, max_length=120)
-    email: EmailStr
-    password: str = Field(min_length=10, max_length=128)
-    workspace_name: str = Field(default="My Workspace", min_length=2, max_length=160)
-
-
 class LoginInput(InputModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class ForgotPasswordInput(InputModel):
+    email: EmailStr
+
+
+class ResetPasswordInput(InputModel):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6, pattern=r'^\d{6}$')
+    new_password: str = Field(min_length=10, max_length=128)
+
 
 
 class MemberInput(InputModel):

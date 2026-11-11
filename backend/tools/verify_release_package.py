@@ -29,7 +29,7 @@ def main():
     assert all((target/name).is_file() for name in required)
     example=(target/'backend/.env.example').read_text()
     sensitive=['GEMINI_API_KEY','GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','TOKEN_ENCRYPTION_KEY','APP_SECRET_KEY',
-        'ELEVENLABS_API_KEY','GOOGLE_TTS_API_KEY','BRAVE_SEARCH_API_KEY','PEXELS_API_KEY','PIXABAY_API_KEY']
+        'ELEVENLABS_API_KEY','GOOGLE_TTS_API_KEY','BRAVE_SEARCH_API_KEY','PEXELS_API_KEY','PIXABAY_API_KEY','SMTP_PASSWORD']
     for line in example.splitlines():
         if '=' in line:
             key,value=line.split('=',1)

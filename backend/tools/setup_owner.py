@@ -1,5 +1,7 @@
 """Local operator bootstrap/reset. Web registration never grants administration."""
-import argparse,getpass
+import argparse,getpass,sys
+from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from app.database.migrate import migrate_database
 from app.database.session import SessionLocal
 from app.core.security import hash_password,new_id

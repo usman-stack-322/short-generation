@@ -20,7 +20,7 @@ export async function api(path, options = {}) {
     },
   });
   const body = await response.json().catch(() => ({}));
-  if (response.status === 401 && token && !path.startsWith('/auth/')) {
+  if (response.status === 401 && token && !["/auth/login", "/auth/forgot-password", "/auth/reset-password"].includes(path)) {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     localStorage.removeItem('role');
