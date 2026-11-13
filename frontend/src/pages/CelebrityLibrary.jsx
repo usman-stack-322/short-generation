@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, mediaUrl } from "../services/api";
 import { PageHeader, EmptyState } from "../components/Shell";
 import { Button } from "../components/UI";
-import { Film, FolderOpen, FolderUp, Image as ImageIcon, RefreshCw, Search, Upload } from "lucide-react";
+import { Film, FolderOpen, FolderUp, Image as ImageIcon, Lock, RefreshCw, Search, Upload } from "lucide-react";
 
 const ALLOWED_EXT_RE = /\.(jpg|jpeg|png|webp|mp4|mov|webm|mkv|m4v)$/i;
 
@@ -153,12 +153,19 @@ export default function CelebrityLibrary() {
     }))
     .filter((c) => c.assets.length > 0);
 
+  const isAdmin = ["OWNER", "ADMIN"].includes(localStorage.getItem("role"));
   return (
     <div className="celebrity-vault-page">
       <PageHeader
         eyebrow="CELEBRITY VAULT"
         title="Celebrity Folder Library"
-        description="Connect a main directory of celebrity subfolders or upload your main parent folder directly (fast indexing for large folders)."
+        description="Connect a main directory of celebrity subfolders or browse the shared workspace celebrity clips and photos below."
+        action={!isAdmin && (
+          <span className="studio-lock-pill">
+            <Lock size={12} />
+            <span>View &amp; Use Only (Uploads Managed by Owner)</span>
+          </span>
+        )}
       />
 
       {error && <div className="notice notice-error" role="alert">{error}</div>}
@@ -167,10 +174,13 @@ export default function CelebrityLibrary() {
 
       <div className="vault-top-grid">
         <form className="studio-card" onSubmit={connectFolder}>
-          <h3 className="studio-card-title">
-            <FolderOpen size={18} />
-            <span>Connect Local Folder Path (Recommended for Large Folders)</span>
-          </h3>
+          <div className="studio-card-head">
+            <h3 className="studio-card-title" style={{ margin: 0 }}>
+              <FolderOpen size={18} />
+              <span>Connect Local Folder Path</span>
+            </h3>
+            {!isAdmin && <span className="studio-lock-pill"><Lock size={12} /> Owner Only</span>}
+          </div>
 
           <div className="studio-field">
             <label className="studio-label" htmlFor="vault-folder-path">Main Parent Directory Path</label>
@@ -180,6 +190,7 @@ export default function CelebrityLibrary() {
                 id="vault-folder-path"
                 className="studio-mono-input"
                 required
+                disabled={!isAdmin}
                 placeholder="D:\data video or C:\celebrity_vault"
                 value={folderPath}
                 onChange={(e) => setFolderPath(e.target.value)}
@@ -191,6 +202,7 @@ export default function CelebrityLibrary() {
             <label className="studio-label" htmlFor="vault-preference">Scene Matching Preference</label>
             <select
               id="vault-preference"
+              disabled={!isAdmin}
               value={preference}
               onChange={(e) => setPreference(e.target.value)}
             >
@@ -205,22 +217,27 @@ export default function CelebrityLibrary() {
           </p>
 
           <div className="studio-card-footer">
-            <Button type="submit" loading={busy} style={{ width: "100%" }}>
-              Scan &amp; Connect Folder
+            <Button type="submit" loading={busy} disabled={!isAdmin} style={{ width: "100%" }}>
+              {!isAdmin && <Lock size={14} />}
+              <span>{isAdmin ? "Scan & Connect Folder" : "Folder Connection Locked (Owner/Admin)"}</span>
             </Button>
           </div>
         </form>
 
         <div className="studio-card">
-          <h3 className="studio-card-title">
-            <Upload size={18} />
-            <span>Bulk Upload Main Folder / Celebrity Files</span>
-          </h3>
+          <div className="studio-card-head">
+            <h3 className="studio-card-title" style={{ margin: 0 }}>
+              <Upload size={18} />
+              <span>Bulk Upload Celebrity Files</span>
+            </h3>
+            {!isAdmin && <span className="studio-lock-pill"><Lock size={12} /> Owner Only</span>}
+          </div>
 
           <div className="studio-field">
             <label className="studio-label" htmlFor="vault-celeb-name">Celebrity Name (leave blank when uploading a Main Folder)</label>
             <input
               id="vault-celeb-name"
+              disabled={!isAdmin}
               placeholder="Leave blank if uploading MainFolder/CelebrityName/..."
               value={bulkCelebrity}
               onChange={(e) => setBulkCelebrity(e.target.value)}
@@ -229,9 +246,10 @@ export default function CelebrityLibrary() {
 
           <div
             className={`vault-dropzone ${dragging ? "dragging" : ""}`}
-            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+            onDragOver={(e) => { if (!isAdmin) return; e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}
             onDrop={async (e) => {
+              if (!isAdmin) return;
               e.preventDefault();
               setDragging(false);
               const items = await collectDroppedFiles(e.dataTransfer);
@@ -239,10 +257,12 @@ export default function CelebrityLibrary() {
             }}
           >
             <p className="vault-helper-text">
-              Drag &amp; drop your entire main celebrity folder here (uploaded automatically in fast batches)
+              {isAdmin
+                ? "Drag & drop your entire main celebrity folder here (uploaded automatically in fast batches)"
+                : "Employee accounts can view and use shared Celebrity Vault clips below. Uploads are managed by Owner/Admin."}
             </p>
             <div className="vault-upload-actions">
-              <label className="button button-secondary" style={{ cursor: "pointer", margin: 0 }}>
+              <label className={`button button-secondary ${!isAdmin ? "disabled" : ""}`} style={{ cursor: isAdmin ? "pointer" : "not-allowed", margin: 0, opacity: isAdmin ? 1 : 0.6 }}>
                 <ImageIcon size={15} />
                 <span>Upload Files</span>
                 <input
@@ -250,11 +270,11 @@ export default function CelebrityLibrary() {
                   multiple
                   accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm,.mkv,.m4v"
                   style={{ display: "none" }}
-                  disabled={busy}
+                  disabled={busy || !isAdmin}
                   onChange={(e) => uploadBulkFiles(e.target.files)}
                 />
               </label>
-              <label className="button button-primary" style={{ cursor: "pointer", margin: 0 }}>
+              <label className={`button button-primary ${!isAdmin ? "disabled" : ""}`} style={{ cursor: isAdmin ? "pointer" : "not-allowed", margin: 0, opacity: isAdmin ? 1 : 0.6 }}>
                 <FolderUp size={15} />
                 <span>Upload Main Folder</span>
                 <input
@@ -263,7 +283,7 @@ export default function CelebrityLibrary() {
                   webkitdirectory=""
                   directory=""
                   style={{ display: "none" }}
-                  disabled={busy}
+                  disabled={busy || !isAdmin}
                   onChange={(e) => uploadBulkFiles(e.target.files)}
                 />
               </label>
@@ -286,10 +306,12 @@ export default function CelebrityLibrary() {
             <span className="count-chip">{library.total_assets} assets</span>
             <span className="vault-helper-text">{library.celebrities.length} celebrities indexed (showing up to 12 previews each)</span>
           </div>
-          <Button variant="secondary" disabled={busy} onClick={() => connectFolder(null)}>
-            <RefreshCw size={14} />
-            <span>Rescan</span>
-          </Button>
+          {["OWNER", "ADMIN"].includes(localStorage.getItem("role")) && (
+            <Button variant="secondary" disabled={busy} onClick={() => connectFolder(null)}>
+              <RefreshCw size={14} />
+              <span>Rescan</span>
+            </Button>
+          )}
         </div>
       )}
 

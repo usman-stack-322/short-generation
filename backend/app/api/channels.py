@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.security import current_context, new_id, require_owner, require_editor
+from app.core.security import current_context, new_id, require_admin
 from app.database.session import get_db
 from app.models import Channel, WorkspaceMember,ChannelAssignment
 from app.schemas import ChannelInput
@@ -63,7 +63,7 @@ class ChannelSettings(InputModel):
 
 
 @router.patch('/api/channels/{channel_id}')
-def configure_channel(channel_id:str,payload:ChannelSettings,context=Depends(require_editor),db:Session=Depends(get_db)):
+def configure_channel(channel_id:str,payload:ChannelSettings,context=Depends(require_admin),db:Session=Depends(get_db)):
     channel=db.get(Channel,channel_id)
     if not channel or channel.workspace_id!=context[1].workspace_id:
         raise HTTPException(404,'Workspace channel not found')
@@ -90,7 +90,7 @@ def configure_channel(channel_id:str,payload:ChannelSettings,context=Depends(req
     return {'id':channel.id,'approval_policy':channel.approval_policy}
 
 @router.get("/api/channels")
-def list_channels(context=Depends(current_context), db: Session = Depends(get_db)):
+def list_channels(context=Depends(require_admin), db: Session = Depends(get_db)):
     _, membership = context
     query = db.query(Channel).filter_by(workspace_id=membership.workspace_id)
     visible_ids = _accessible_channel_ids(db, membership)
@@ -100,7 +100,7 @@ def list_channels(context=Depends(current_context), db: Session = Depends(get_db
     member_names = {m.id: m.user.name for m in db.query(WorkspaceMember).filter_by(workspace_id=membership.workspace_id).all()}
     return [{
         "id": c.id, "name": c.name, "youtube_channel_id": c.youtube_channel_id,
-        **({'assigned_member_ids':[r.member_id for r in db.query(ChannelAssignment).filter_by(channel_id=c.id)]} if membership.role=='OWNER' else {}),
+        **({'assigned_member_ids':[r.member_id for r in db.query(ChannelAssignment).filter_by(channel_id=c.id)]} if membership.role in {'OWNER','ADMIN'} else {}),
         "profile_image_url": c.profile_image_url, "status": c.status, "member_id": c.member_id,
         "member_name": member_names.get(c.member_id) if c.member_id else None,
         "default_language": c.default_language, "default_voice": c.default_voice, "voice_style": c.voice_style,
@@ -117,14 +117,14 @@ def list_channels(context=Depends(current_context), db: Session = Depends(get_db
 
 
 @router.get('/api/channels/{channel_id}')
-def read_channel(channel_id:str,context=Depends(current_context),db:Session=Depends(get_db)):
+def read_channel(channel_id:str,context=Depends(require_admin),db:Session=Depends(get_db)):
     from app.youtube.permissions import channel_access
     channel_access(db.get(Channel,channel_id),context[1])
     return next(row for row in list_channels(context,db) if row['id']==channel_id)
 
 
 @router.post("/api/channels", status_code=status.HTTP_201_CREATED)
-def create_channel(payload: ChannelInput, context=Depends(require_editor), db: Session = Depends(get_db)):
+def create_channel(payload: ChannelInput, context=Depends(require_admin), db: Session = Depends(get_db)):
     _, membership = context
     if payload.member_id not in {None,membership.id}:
         raise HTTPException(403,'Create channels only in your own workspace')

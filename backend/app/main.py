@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.database.seed import seed_demo_data
+from app.database.seed import bootstrap_initial_owner, seed_demo_data
 from app.database.session import Base, engine, SessionLocal
 from app.models import VideoJob
 from app.api import auth, channels, dashboard, members, personalities, videos
@@ -28,6 +28,12 @@ async def lifespan(app):
     migrate_database()
     if settings.seed_demo:
         seed_demo_data()
+    if settings.initial_owner_email and settings.initial_owner_password:
+        bootstrap_initial_owner(
+            settings.initial_owner_email,
+            settings.initial_owner_password,
+            settings.initial_owner_name,
+        )
     # The local worker is in-process. Interrupted jobs remain visible and retryable.
     with SessionLocal() as db:
         recover_interrupted_jobs(db)

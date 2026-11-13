@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.core.config import settings
-from app.core.security import current_context, new_id, require_editor, require_owner
+from app.core.security import current_context, new_id, require_admin, require_editor, require_owner
 from app.database.session import get_db
 from app.models import Asset, Channel, Personality, SEOData, Script, Topic, Video, VideoJob, VoiceGeneration, Thumbnail
 from app.schemas import GenerateVideoInput, RegenerateInput, ScriptInput, RejectInput
@@ -165,14 +165,14 @@ def classify_video(job_id: str, payload: dict, context=Depends(require_editor), 
 
 
 @router.post("/api/videos/{job_id}/approve")
-def approve_video(job_id: str, payload: dict | None = None, context=Depends(require_editor), db: Session = Depends(get_db)):
+def approve_video(job_id: str, payload: dict | None = None, context=Depends(require_admin), db: Session = Depends(get_db)):
     job=job_access(db,job_id,context[1],True)
     approve(db,job,context[1],(payload or {}).get('content_revision'))
     return serialize_job(job,db)
 
 
 @router.post("/api/videos/{job_id}/reject")
-def reject_video(job_id: str, payload: RejectInput = RejectInput(), context=Depends(require_editor), db: Session = Depends(get_db)):
+def reject_video(job_id: str, payload: RejectInput = RejectInput(), context=Depends(require_admin), db: Session = Depends(get_db)):
     job=job_access(db,job_id,context[1],True)
     if not can_approve(db.get(Channel,job.channel_id),context[1]):
         raise HTTPException(403,'Channel policy does not allow your rejection')
@@ -373,7 +373,7 @@ def edit_script(job_id: str, payload: ScriptInput, context=Depends(require_edito
 
 
 @router.delete("/api/videos/{job_id}")
-def delete_video(job_id: str, context=Depends(require_owner), db: Session = Depends(get_db)):
+def delete_video(job_id: str, context=Depends(require_admin), db: Session = Depends(get_db)):
     _, membership = context
     job = db.get(VideoJob, job_id)
     if not job or job.workspace_id != membership.workspace_id:

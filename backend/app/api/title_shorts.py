@@ -1,5 +1,5 @@
 """Authenticated title-short drafts; script review is an explicit render boundary."""
-import json,hashlib,uuid
+import json,hashlib,shutil,uuid
 from sqlalchemy.exc import IntegrityError
 from pathlib import Path
 from fastapi import APIRouter,BackgroundTasks,Depends,HTTPException,Request
@@ -7,9 +7,9 @@ from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from app.core.config import settings
-from app.core.security import current_context,require_editor,new_id,bearer
+from app.core.security import current_context,require_editor,require_admin,new_id,bearer
 from app.database.session import get_db
-from app.models import TitleShortDraft
+from app.models import TitleShortDraft,User
 from app.services.title_shorts import ACTIVE,TitleInput,EditInput,ActionInput,SceneInput,SourcesInput,work,Plan,preflight
 
 router=APIRouter(prefix='/api/title-shorts',tags=['Title to AI Short'])
@@ -22,7 +22,13 @@ def access(db,id,membership):
     return row
 
 
-def public(row):
+def _creator_names(db:Session,rows:list[TitleShortDraft])->dict[str,str]:
+    ids={r.creator_id for r in rows if r.creator_id}
+    if not ids:return {}
+    return {u.id:u.name for u in db.query(User).filter(User.id.in_(ids)).all()}
+
+
+def public(row,creator_name:str|None=None):
     data=json.loads(row.data);plan=data.get('plan');assets=data.get('assets',[])
     base='/api/title-shorts/'+row.id+'/media/'
     scenes=[]
@@ -49,7 +55,7 @@ def public(row):
         'output_duration':video.get('duration') if video else None,'render_history':[{'revision':v['revision'],'duration':v['duration'],'video_url':base+'video?revision='+str(v['revision'])} for v in data.get('renders',[])],
         'media_mode':data.get('media_mode','online'),'media_preference':data.get('media_preference','mix_both'),'collection_id':data.get('collection_id'),
         'review_status':data.get('review_status') or ('pending_review' if row.status=='ready' else 'rendering' if row.status in {'validating','visuals','voiceover','rendering'} else 'draft'),
-        'review_note':data.get('review_note',''),'youtube_video_id':data.get('youtube_video_id'),'youtube_url':data.get('youtube_url'),'creator_id':row.creator_id,
+        'review_note':data.get('review_note',''),'youtube_video_id':data.get('youtube_video_id'),'youtube_url':data.get('youtube_url'),'creator_id':row.creator_id,'creator_name':creator_name or '',
         'online_fallback':data.get('online_fallback',False),'channel_id':data.get('channel_id'),
         'video_job_id':data.get('video_job_id'),'scene_locks':data.get('scene_locks',[]),
         'uploads_enabled':settings.youtube_uploads_enabled,'created_at':row.created_at.isoformat()}
@@ -67,7 +73,9 @@ def listing(context=Depends(current_context),db:Session=Depends(get_db)):
     q=db.query(TitleShortDraft).filter_by(workspace_id=context[1].workspace_id)
     if context[1].role not in {'OWNER','ADMIN'}:
         q=q.filter_by(creator_id=context[0].id)
-    return [public(row) for row in q.order_by(TitleShortDraft.created_at.desc()).limit(50)]
+    rows=q.order_by(TitleShortDraft.created_at.desc()).limit(50).all()
+    names=_creator_names(db,rows)
+    return [public(row,names.get(row.creator_id)) for row in rows]
 
 
 @router.post('',status_code=201)
@@ -78,6 +86,8 @@ def create(payload:TitleInput,background:BackgroundTasks,context=Depends(require
     if payload.media_mode in {'local','mixed'} and not payload.collection_id:
         raise HTTPException(422,'Select a personal collection for local media')
     if payload.channel_id:
+        if context[1].role not in {'OWNER','ADMIN'}:
+            raise HTTPException(403,'Employees cannot attach a YouTube channel')
         from app.models import Channel
         from app.youtube.permissions import channel_access
         channel_access(db.get(Channel,payload.channel_id),context[1],True)
@@ -178,7 +188,9 @@ def set_sources(id:str,payload:SourcesInput,background:BackgroundTasks,context=D
 
 @router.get('/{id}')
 def get(id:str,context=Depends(current_context),db:Session=Depends(get_db)):
-    return public(access(db,id,context[1]))
+    row=access(db,id,context[1])
+    u=db.get(User,row.creator_id) if row.creator_id else None
+    return public(row,u.name if u else '')
 
 
 @router.put('/{id}/script')
@@ -321,21 +333,45 @@ class FinalizeInput(ActionInput):
 
 
 @router.post('/{id}/finalize')
-def finalize(id:str,payload:FinalizeInput,context=Depends(require_editor),db:Session=Depends(get_db)):
+def finalize(id:str,payload:FinalizeInput,context=Depends(require_admin),db:Session=Depends(get_db)):
     from app.services.title_export import finalize_draft
     row=access(db,id,context[1])
     return finalize_draft(db,row,payload,context[1])
 
 
+def delete_accessible_draft(db:Session,draft_id:str,membership)->dict:
+    row=access(db,draft_id,membership)
+    if row.status in ACTIVE:
+        raise HTTPException(409,'Cannot delete a draft while rendering or researching')
+    data=json.loads(row.data or '{}')
+    rev_status=data.get('review_status') or 'draft'
+    if membership.role not in {'OWNER','ADMIN'} and rev_status not in {'draft','rejected'}:
+        raise HTTPException(403,'Only Workspace Owner/Admin can delete submitted or approved videos')
+    root=(Path(settings.generated_dir).resolve()/'title-shorts'/draft_id).resolve()
+    db.delete(row);db.commit()
+    if (Path(settings.generated_dir).resolve()/'title-shorts') in root.parents and root.exists():
+        shutil.rmtree(root,ignore_errors=True)
+    return {'deleted':True,'id':draft_id}
+
+
+@router.delete('/{id}')
+def delete_draft(id:str,context=Depends(require_editor),db:Session=Depends(get_db)):
+    return delete_accessible_draft(db,id,context[1])
+
+
 def media_context(request:Request,credentials=Depends(bearer),db:Session=Depends(get_db)):
     if credentials is None and request.cookies.get('media_session'):
         credentials=HTTPAuthorizationCredentials(scheme='Bearer',credentials=request.cookies['media_session'])
-    return current_context(credentials,db)
+    return current_context(credentials,db,request)
 
 
 @router.get('/{id}/media/{kind}')
 def media(id:str,kind:str,revision:int,scene:int=1,download:bool=False,context=Depends(media_context),db:Session=Depends(get_db)):
     row=access(db,id,context[1]);data=json.loads(row.data)
+    if download and kind=='video' and context[1].role not in {'OWNER','ADMIN'}:
+        review_status=data.get('review_status') or ('pending_review' if row.status=='ready' else 'draft')
+        if review_status not in {'approved','uploaded'}:
+            raise HTTPException(403,'Download is locked until the workspace owner approves this short')
     if kind in {'video','credits','sources'}:
         records=[*data.get('renders',[]),data.get('video') or {}];record=next((r for r in records if r.get('revision')==revision),None)
         if not record:raise HTTPException(404,'Rendered revision not found')

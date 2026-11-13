@@ -230,3 +230,26 @@ class SettingsInput(InputModel):
         if v not in {'demo','rss'}: raise ValueError('Invalid research provider')
         return v
 
+
+class InviteLinkCreateInput(InputModel):
+    role: str = 'MEMBER'
+    isolated: bool = False
+    label: str = Field(default='', max_length=120)
+    target_email: EmailStr | None = None
+    expires_in_days: int = Field(default=7, ge=1, le=30)
+
+    @field_validator('role')
+    @classmethod
+    def valid_invite_role(cls, v):
+        val = v.upper()
+        if val not in {'ADMIN', 'MEMBER'}:
+            raise ValueError('Invite role must be ADMIN or MEMBER')
+        return val
+
+
+class InviteAcceptInput(InputModel):
+    token: str = Field(min_length=16, max_length=200)
+    name: str = Field(min_length=2, max_length=120)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+

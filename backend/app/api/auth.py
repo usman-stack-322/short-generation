@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -16,21 +16,32 @@ router = APIRouter()
 generated_dir = Path(settings.generated_dir).resolve()
 
 
+def _is_https_request(request: Request) -> bool:
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").lower()
+    origin = (request.headers.get("origin") or "").lower()
+    return proto.startswith("https") or origin.startswith("https://")
+
+
 @router.post('/api/auth/media-session')
-def media_session(response: Response, context=Depends(current_context)):
+def media_session(request: Request, response: Response, context=Depends(current_context)):
     # This cookie is read ONLY by the read-only media route, never mutation APIs.
-    response.set_cookie('media_session', create_token(context[0].id), httponly=True, samesite='lax', path='/generated', max_age=86400)
-    response.set_cookie('media_session', create_token(context[0].id), httponly=True, samesite='lax', path='/api/library/media', max_age=86400)
-    response.set_cookie('media_session', create_token(context[0].id), httponly=True, samesite='lax', path='/api/title-shorts', max_age=86400)
-    response.set_cookie('media_session', create_token(context[0].id), httponly=True, samesite='lax', path='/api/assets/vault', max_age=86400)
+    https = _is_https_request(request)
+    samesite = 'none' if https else 'lax'
+    token = create_token(context[0].id)
+    for cookie_path in ('/generated', '/api/library/media', '/api/title-shorts', '/api/assets/vault'):
+        response.set_cookie(
+            'media_session', token, httponly=True,
+            samesite=samesite, secure=https, path=cookie_path, max_age=86400,
+        )
     return {'configured': True}
 
 
 @router.post('/api/auth/logout')
-def logout(response: Response):
-    response.delete_cookie('media_session', path='/generated')
-    response.delete_cookie('media_session', path='/api/library/media')
-    response.delete_cookie('media_session', path='/api/title-shorts')
+def logout(request: Request, response: Response):
+    https = _is_https_request(request)
+    samesite = 'none' if https else 'lax'
+    for cookie_path in ('/generated', '/api/library/media', '/api/title-shorts', '/api/assets/vault'):
+        response.delete_cookie('media_session', path=cookie_path, samesite=samesite, secure=https)
     return {'signed_out': True}
 
 
@@ -96,4 +107,13 @@ def reset_password(payload: ResetPasswordInput, db: Session = Depends(get_db)):
 @router.get("/api/auth/me")
 def me(context=Depends(current_context)):
     user, membership = context
-    return {"id": user.id, "name": user.name, "email": user.email, "role": membership.role, "workspace_id": membership.workspace_id, "can_manage_admins": membership.can_manage_admins}
+    ws_name = membership.workspace.name if membership.workspace else membership.workspace_id
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "role": membership.role,
+        "workspace_id": membership.workspace_id,
+        "workspace_name": ws_name,
+        "can_manage_admins": membership.can_manage_admins,
+    }

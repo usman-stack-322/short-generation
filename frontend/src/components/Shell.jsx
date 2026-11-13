@@ -5,22 +5,28 @@ import Notifications from "./Notifications";
 import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
-  Bell, ChevronDown, Clapperboard, LayoutDashboard, LogOut,
-  Menu, Settings, Sparkles, Users, WandSparkles, Youtube,
+  Bell, ChevronDown, Clapperboard, Download, LayoutDashboard, LogOut,
+  Menu, Settings, Sparkles, Users, WandSparkles,
 } from "lucide-react";
 
 const links = [
-  ["/", "Dashboard", LayoutDashboard],
-  ["/title-to-short", "Create Short", WandSparkles],
-  ["/celebrity-library", "Celebrity Folder", Clapperboard],
-  ["/review-queue", "Review Queue", Sparkles],
-  ["/channels", "My Channels", Youtube],
-  ["/library", "Media Library", Clapperboard],
-  ["/videos", "My Videos", Clapperboard],
-  ["/uploads", "Upload History", Youtube],
-  ["/account", "Account Settings", Settings],
-  ["/team", "Team Management", Users],
+  ["/", "Dashboard", LayoutDashboard, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
+  ["/title-to-short", "Create Short", WandSparkles, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
+  ["/celebrity-library", "Celebrity Folder", Clapperboard, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
+  ["/videos", "My Videos", Clapperboard, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
+  ["/review-queue", "Review Queue", Sparkles, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
+  ["/uploads", "Export History", Download, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
+  ["/library", "Media Library", Clapperboard, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
+  ["/team", "Team & Roles", Users, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
+  ["/account", "Account Settings", Settings, ["OWNER", "ADMIN", "MEMBER", "EDITOR", "VIEWER"]],
 ];
+
+function roleLabel(role) {
+  if (role === "OWNER") return "Owner";
+  if (role === "ADMIN") return "Admin";
+  if (role === "MEMBER" || role === "EDITOR") return "Employee";
+  return role || "Employee";
+}
 
 export function Shell({ user, children }) {
   const navigate = useNavigate();
@@ -53,6 +59,7 @@ export function Shell({ user, children }) {
   const logout = async () => {
     try { await api("/auth/logout",{method:"POST"}); } catch {}
     resetMediaSession();
+    localStorage.removeItem("workspace_id");
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     localStorage.removeItem("role");
@@ -81,14 +88,14 @@ export function Shell({ user, children }) {
             ) : (
               <div className="workspace-name">{workspace?.name || 'Owner workspace'}</div>
             )}
-            <span className="role-badge-chip">{role}</span>
+            <span className="role-badge-chip">{roleLabel(role)}</span>
           </div>
         </div>
         <div className="nav-label">WORKSPACE</div>
-        <nav aria-label="Workspace navigation">{links.filter(([to]) => (to !== "/team" || ["OWNER","ADMIN"].includes(role)) && (!["/create","/title-to-short"].includes(to) || role !== "VIEWER")).map(([to, label, Icon]) => <NavLink key={to} aria-label={label} title={label} to={to} onClick={() => setMenuOpen(false)} end={to === "/"} className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}><Icon size={17} /><span>{to === "/channels" && role !== "OWNER" ? "My Channels" : label}</span></NavLink>)}</nav>
+        <nav aria-label="Workspace navigation">{links.filter(([, , , roles]) => roles.includes(role)).map(([to, label, Icon]) => <NavLink key={to} aria-label={label} title={label} to={to} onClick={() => setMenuOpen(false)} end={to === "/"} className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}><Icon size={17} /><span>{label}</span></NavLink>)}</nav>
         <div className="sidebar-bottom">
-          {["OWNER","ADMIN"].includes(role)&&<div className="upgrade-card"><span className="upgrade-icon"><Sparkles size={16} /></span><strong>Make more with AI</strong><p>{!configuration ? 'Checking provider configuration.' : configuration.gemini_configured ? 'Gemini is configured for custom scripts.' : 'Connect your AI provider to unlock custom scripts.'}</p><button onClick={() => navigate("/settings")}>Explore settings <span>↗</span></button></div>}
-          <div className="profile"><div className="avatar">{(user?.name || "D").slice(0, 1).toUpperCase()}</div><div className="profile-copy"><strong>{user?.name || "Demo Owner"}</strong><small>{role}</small></div><button className="icon-button" title="Sign out" onClick={logout}><LogOut size={16} /></button></div>
+          <div className="upgrade-card"><span className="upgrade-icon"><Sparkles size={16} /></span><strong>Make more with AI</strong><p>{!configuration ? 'Checking provider configuration.' : configuration.ai_configured || configuration.gemini_configured ? 'AI cascade is ready for Title-to-Short creation.' : 'Connect your AI provider or use Title-to-Short studio.'}</p><button onClick={() => navigate(["OWNER","ADMIN"].includes(role) ? "/settings" : "/title-to-short")}>{["OWNER","ADMIN"].includes(role) ? "Explore settings" : "Create a Short"} <span>↗</span></button></div>
+          <div className="profile"><div className="avatar">{(user?.name || "U").slice(0, 1).toUpperCase()}</div><div className="profile-copy"><strong>{user?.name || "Studio User"}</strong><small>{roleLabel(role)}</small></div><button className="icon-button" title="Sign out" onClick={logout}><LogOut size={16} /></button></div>
         </div>
       </aside>
       <main className="main-area">

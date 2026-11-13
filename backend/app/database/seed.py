@@ -48,3 +48,24 @@ def seed_demo_data():
         db.close()
 
 
+def bootstrap_initial_owner(email: str, password: str, name: str = "Platform Owner"):
+    """Create the initial platform owner workspace cleanly when configured via environment variables."""
+    email = (email or "").strip().lower()
+    if not email or not password or len(password) < 8:
+        return
+    db = SessionLocal()
+    try:
+        Base.metadata.create_all(bind=engine)
+        if db.query(User).filter_by(email=email).first():
+            return
+        display = (name or "Platform Owner").strip() or "Platform Owner"
+        workspace = Workspace(id=new_id(), name=f"{display} Workspace")
+        owner = User(id=new_id(), name=display, email=email, password_hash=hash_password(password))
+        db.add_all([workspace, owner])
+        db.flush()
+        db.add(WorkspaceMember(id=new_id(), workspace_id=workspace.id, user_id=owner.id, role="OWNER", active=True))
+        db.commit()
+    finally:
+        db.close()
+
+

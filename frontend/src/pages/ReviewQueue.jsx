@@ -1,211 +1,377 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import {
+  CheckCircle2,
+  Download,
+  Film,
+  Lock,
+  Send,
+  Sparkles,
+  Trash2,
+  User,
+  XCircle,
+} from "lucide-react";
 import { api, mediaUrl } from "../services/api";
-import { PageHeader, EmptyState } from "../components/Shell";
-import { Button } from "../components/UI";
-import { CheckCircle2, Film, RotateCcw, Youtube } from "lucide-react";
+import { PageHeader } from "../components/Shell";
+import { Button, Loading, Notice } from "../components/UI";
+
+const TABS = [
+  ["pending_review", "Pending Approval"],
+  ["approved", "Approved"],
+  ["rejected", "Changes Requested"],
+  ["draft", "Unsubmitted Drafts"],
+  ["all", "All Shorts"],
+];
+
+function badgeText(reviewStatus) {
+  switch (reviewStatus) {
+    case "pending_review":
+      return "Pending Approval";
+    case "approved":
+      return "Approved";
+    case "rejected":
+      return "Changes Requested";
+    case "uploaded":
+      return "Approved / Exported";
+    default:
+      return "Draft";
+  }
+}
 
 export default function ReviewQueue() {
-  const [drafts, setDrafts] = useState([]);
-  const [channels, setChannels] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const role = localStorage.getItem("role") || "MEMBER";
+  const isAdmin = ["OWNER", "ADMIN"].includes(role);
+  const [drafts, setDrafts] = useState(null);
+  const [filter, setFilter] = useState("pending_review");
+  const [selectedId, setSelectedId] = useState("");
   const [note, setNote] = useState("");
-  const [privacy, setPrivacy] = useState("private");
-  const [channelId, setChannelId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
-  const role = localStorage.getItem("role") || "MEMBER";
-  const canApprove = ["OWNER", "ADMIN"].includes(role);
+  const [status, setStatus] = useState("");
 
-  async function load() {
+  async function loadQueue() {
     try {
-      const [rows, ch] = await Promise.all([api("/title-shorts"), api("/channels")]);
-      setDrafts(rows);
-      setChannels(ch);
-      const reviewList = rows.filter((d) => d.video_url || ["pending_review", "approved", "rejected", "uploaded"].includes(d.review_status));
-      if (selected) {
-        const updated = rows.find((r) => r.id === selected.id);
-        if (updated) setSelected(updated);
-      } else if (reviewList.length > 0) {
-        setSelected(reviewList[0]);
-        setNote(reviewList[0].review_note || "");
-        setChannelId(reviewList[0].channel_id || "");
+      const rows = await api("/title-shorts");
+      const allDrafts = rows || [];
+      setDrafts(allDrafts);
+      if (allDrafts.length > 0 && !allDrafts.some((r) => r.id === selectedId)) {
+        const firstPending = allDrafts.find((r) => r.review_status === "pending_review") || allDrafts[0];
+        setSelectedId(firstPending.id);
       }
-    } catch (e) {
-      setError(e.message);
+    } catch (err) {
+      setError(err.message);
     }
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    loadQueue();
+  }, [isAdmin]);
 
-  async function submitReview(action) {
+  async function submitForReview(id) {
+    setBusy(true);
+    setError("");
+    setStatus("");
+    try {
+      await api(`/projects/${id}/submit-review`, { method: "POST" });
+      setStatus("Submitted for workspace owner approval.");
+      await loadQueue();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const visibleDrafts = (drafts || []).filter((r) => {
+    if (filter === "all") return true;
+    return (r.review_status || "draft") === filter;
+  });
+
+  const selected =
+    visibleDrafts.find((r) => r.id === selectedId) ||
+    (drafts || []).find((r) => r.id === selectedId) ||
+    visibleDrafts[0] ||
+    null;
+
+  useEffect(() => {
     if (!selected) return;
-    setBusy(true); setError(""); setMessage("");
+    setNote(selected.review_note || "");
+  }, [selected?.id]);
+
+  async function submitDecision(action) {
+    if (!selected) return;
+    setBusy(true);
+    setError("");
+    setStatus("");
     try {
       const updated = await api(`/projects/${selected.id}/review`, {
         method: "POST",
         body: JSON.stringify({ action, note }),
       });
-      setSelected(updated);
-      setMessage(`Project marked as ${updated.review_status}.`);
-      await load();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function approveAndUpload() {
-    if (!selected) return;
-    setBusy(true); setError(""); setMessage("");
-    try {
-      if (selected.review_status !== "approved") {
-        await api(`/projects/${selected.id}/review`, {
-          method: "POST",
-          body: JSON.stringify({ action: "approve", note }),
-        });
-      }
-      const res = await api(`/projects/${selected.id}/upload-youtube`, {
-        method: "POST",
-        body: JSON.stringify({
-          channel_id: channelId || selected.channel_id || null,
-          title: (selected.scope?.proposed_title || selected.title).slice(0, 100),
-          description: selected.analysis?.angle || selected.title,
-          privacy_status: privacy,
-        }),
-      });
-      setSelected(res.draft);
-      setMessage(
-        res.mode === "youtube_api"
-          ? `Uploaded to YouTube: ${res.youtube_url}`
-          : `Mock/Fallback YouTube Upload recorded (${res.youtube_url}). Add client_secrets.json + OAuth for live YouTube upload.`
+      setStatus(
+        action === "approve"
+          ? `Approved "${updated.title}". Employee download is now unlocked.`
+          : `Sent revision feedback for "${updated.title}".`
       );
-      await load();
-    } catch (e) {
-      setError(e.message);
+      await loadQueue();
+    } catch (err) {
+      setError(err.message);
     } finally {
       setBusy(false);
     }
   }
 
-  const reviewable = drafts.filter((d) => d.video_url || ["pending_review", "approved", "rejected", "uploaded"].includes(d.review_status));
+  async function deleteDraft(item) {
+    if (!window.confirm(`Permanently delete "${item.title}"? This removes the rendered video as well.`)) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setStatus("");
+    try {
+      await api(`/projects/${item.id}`, { method: "DELETE" });
+      setStatus(`Deleted "${item.title}".`);
+      if (selectedId === item.id) setSelectedId("");
+      await loadQueue();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (error && !drafts) return <Notice>{error}</Notice>;
+  if (!drafts) return <Loading />;
 
   return (
     <div>
       <PageHeader
-        eyebrow="APPROVAL WORKFLOW"
-        title="Review Queue & YouTube Upload"
-        description="Preview rendered 9:16 shorts, request scene edits, approve, and publish to your workspace YouTube channel."
+        eyebrow="OWNER APPROVAL & EXPORTS"
+        title="Review Queue"
+        description="Inspect drafts and rendered shorts from you and your employees, approve for MP4 download, or remove unwanted drafts."
       />
 
-      {error && <div className="notice notice-error" role="alert">{error}</div>}
-      {message && <div className="notice notice-success" role="status">{message}</div>}
+      {error && <Notice>{error}</Notice>}
+      {status && <Notice type="success">{status}</Notice>}
 
-      {reviewable.length === 0 ? (
-        <EmptyState
-          title="No rendered shorts in the review queue"
-          detail="Render a short in Create Short to submit it for review."
-          action={<Link className="button button-primary" to="/title-to-short">Create Short</Link>}
-        />
-      ) : (
-        <div className="review-studio-grid">
-          <div>
-            <h3 style={{ margin: "0 0 12px", fontSize: 14, color: "#475569" }}>
-              Shorts Projects ({reviewable.length})
-            </h3>
-            {reviewable.map((d) => (
-              <button
-                key={d.id}
-                type="button"
-                className={`review-project-item ${selected?.id === d.id ? "selected" : ""}`}
-                onClick={() => { setSelected(d); setNote(d.review_note || ""); setChannelId(d.channel_id || ""); }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <span className={`status-badge ${d.review_status || "draft"}`}>
-                    {(d.review_status || "draft").replaceAll("_", " ")}
-                  </span>
-                  <span style={{ fontSize: 11.5, color: "#64748b" }}>{d.duration}s · {d.language}</span>
-                </div>
-                <strong style={{ display: "block", fontSize: 13.5, color: "#0f172a", lineHeight: 1.4 }}>
-                  {d.scope?.proposed_title || d.title}
-                </strong>
-                {d.youtube_url && (
-                  <div style={{ fontSize: 12, color: "#4f46e5", marginTop: 6 }}>YouTube: {d.youtube_url}</div>
-                )}
-              </button>
-            ))}
+      <div className="vault-pill-group" style={{ marginBottom: 18 }}>
+        {TABS.map(([key, label]) => {
+          const count =
+            key === "all"
+              ? drafts.length
+              : drafts.filter((d) => (d.review_status || "draft") === key).length;
+          return (
+            <button
+              key={key}
+              type="button"
+              className={`filter-pill ${filter === key ? "active" : ""}`}
+              onClick={() => setFilter(key)}
+            >
+              {label} ({count})
+            </button>
+          );
+        })}
+      </div>
+
+      {visibleDrafts.length === 0 ? (
+        <section className="studio-card">
+          <div className="empty-state">
+            <div className="empty-icon">
+              <Sparkles size={20} />
+            </div>
+            <strong>No items in this review tab</strong>
+            <p>
+              Rendered Title-to-Short drafts submitted by you or your employees appear here for owner review.
+            </p>
+            <Link to="/title-to-short">
+              <Button>Create a Short</Button>
+            </Link>
           </div>
+        </section>
+      ) : (
+        <div className="studio-grid-2">
+          <section className="studio-card">
+            <div className="studio-card-head">
+              <h2>
+                <Film size={17} />
+                <span>Submissions ({visibleDrafts.length})</span>
+              </h2>
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              {visibleDrafts.map((item) => {
+                const isSelected = selected?.id === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setSelectedId(item.id)}
+                    style={{
+                      textAlign: "left",
+                      padding: 14,
+                      borderRadius: 12,
+                      border: isSelected ? "2px solid var(--purple)" : "1px solid var(--line)",
+                      background: isSelected ? "var(--bg-f9f7ff)" : "var(--surface-alt)",
+                      display: "grid",
+                      gap: 7,
+                    }}
+                  >
+                    <div className="studio-action-row" style={{ justifyContent: "space-between" }}>
+                      <span className={`studio-badge ${item.review_status || "draft"}`}>
+                        {badgeText(item.review_status)}
+                      </span>
+                      <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                        {item.language} · {item.output_duration ? `${Math.round(item.output_duration)}s` : `${item.duration}s`}
+                      </span>
+                    </div>
+                    <strong style={{ fontSize: 14, color: "var(--text)" }}>{item.title}</strong>
+                    <div className="studio-action-row">
+                      {item.creator_name && (
+                        <span className="mood-tag">
+                          <User size={11} style={{ marginRight: 4, verticalAlign: "middle" }} />
+                          {item.creator_name}
+                        </span>
+                      )}
+                      <span className="mood-tag">{item.style}</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
 
           {selected && (
-            <div className="studio-card">
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 16 }}>
-                <h3 style={{ margin: 0, fontSize: 16 }}>{selected.scope?.proposed_title || selected.title}</h3>
-                <span className={`status-badge ${selected.review_status || "draft"}`}>
-                  {(selected.review_status || "draft").replaceAll("_", " ")}
-                </span>
+            <section className="studio-card">
+              <div className="studio-card-head">
+                <div>
+                  <span className={`studio-badge ${selected.review_status || "draft"}`}>
+                    {badgeText(selected.review_status)}
+                  </span>
+                  <h2 style={{ marginTop: 8 }}>{selected.title}</h2>
+                  <p className="studio-subtext">
+                    Created by {selected.creator_name || "Workspace Member"} ·{" "}
+                    {selected.voice?.provider || "TTS"} ({selected.voice?.voice || "Auto"})
+                  </p>
+                </div>
+                {(isAdmin || ["draft", "rejected"].includes(selected.review_status || "draft")) ? (
+                  <Button
+                    variant="danger"
+                    loading={busy}
+                    onClick={() => deleteDraft(selected)}
+                    title={isAdmin ? "Delete short permanently" : "Remove unsubmitted draft"}
+                  >
+                    <Trash2 size={14} />
+                    <span>{isAdmin ? "Delete" : "Remove Draft"}</span>
+                  </Button>
+                ) : (
+                  <span className="studio-lock-pill">
+                    <Lock size={12} />
+                    <span>Delete Owner Only</span>
+                  </span>
+                )}
               </div>
 
               {selected.video_url && (
-                <div className="phone-frame">
-                  <video key={selected.video_url} src={mediaUrl(selected.video_url)} controls playsInline />
+                <div
+                  style={{
+                    borderRadius: 12,
+                    overflow: "hidden",
+                    background: "#0f172a",
+                    marginBottom: 16,
+                    display: "grid",
+                    placeItems: "center",
+                  }}
+                >
+                  <video
+                    key={selected.video_url}
+                    controls
+                    preload="metadata"
+                    src={mediaUrl(selected.video_url)}
+                    style={{ width: "100%", maxHeight: 420, objectFit: "contain" }}
+                  />
                 </div>
               )}
 
               <div className="studio-field">
-                <label className="studio-label" htmlFor="review-note">Reviewer Notes &amp; Feedback</label>
+                <label className="studio-label" htmlFor="review-note">Owner Feedback / Approval Note</label>
                 <textarea
                   id="review-note"
                   rows={2}
+                  readOnly={!isAdmin}
+                  placeholder={isAdmin ? "Optional feedback for employee or approval note..." : "Owner feedback will appear here once reviewed..."}
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
-                  placeholder="Optional feedback for scene edits..."
                 />
               </div>
 
-              {canApprove ? (
-                <>
-                  <div className="studio-controls-grid">
-                    <div className="studio-field">
-                      <label className="studio-label" htmlFor="review-channel">Destination YouTube Channel</label>
-                      <select id="review-channel" value={channelId} onChange={(e) => setChannelId(e.target.value)}>
-                        <option value="">Workspace Default</option>
-                        {channels.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                      </select>
-                    </div>
-                    <div className="studio-field">
-                      <label className="studio-label" htmlFor="review-privacy">YouTube Privacy Status</label>
-                      <select id="review-privacy" value={privacy} onChange={(e) => setPrivacy(e.target.value)}>
-                        <option value="private">Private</option>
-                        <option value="unlisted">Unlisted</option>
-                        <option value="public">Public</option>
-                      </select>
-                    </div>
-                  </div>
+              <div className="studio-action-row" style={{ marginBottom: 18 }}>
+                {selected.video_url && (isAdmin || ["approved", "uploaded"].includes(selected.review_status)) ? (
+                  <a
+                    href={mediaUrl(`${selected.video_url}&download=true`)}
+                    download={`short-${selected.id}.mp4`}
+                  >
+                    <Button>
+                      <Download size={15} />
+                      <span>Download Final MP4</span>
+                    </Button>
+                  </a>
+                ) : selected.video_url ? (
+                  <span className="studio-lock-pill">
+                    <Lock size={12} />
+                    <span>Download locked until approved</span>
+                  </span>
+                ) : null}
 
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
-                    <Button disabled={busy} loading={busy} onClick={approveAndUpload}>
-                      <Youtube size={16} /><span>Approve &amp; Upload to YouTube</span>
+                {isAdmin ? (
+                  <>
+                    <Button
+                      variant="secondary"
+                      loading={busy}
+                      onClick={() => submitDecision("approve")}
+                    >
+                      <CheckCircle2 size={15} />
+                      <span>Approve &amp; Unlock for Creator</span>
                     </Button>
-                    <Button variant="secondary" disabled={busy} onClick={() => submitReview("approve")}>
-                      <CheckCircle2 size={15} /><span>Approve Only</span>
+                    <Button
+                      variant="secondary"
+                      loading={busy}
+                      onClick={() => submitDecision("request_changes")}
+                    >
+                      <XCircle size={15} />
+                      <span>Request Changes</span>
                     </Button>
-                    <Button variant="secondary" disabled={busy} onClick={() => submitReview("request_changes")}>
-                      <RotateCcw size={15} /><span>Request Changes</span>
+                  </>
+                ) : (
+                  <>
+                    {selected.video_url && selected.review_status !== "pending_review" && selected.review_status !== "approved" && (
+                      <Button
+                        loading={busy}
+                        onClick={() => submitForReview(selected.id)}
+                      >
+                        <Send size={15} />
+                        <span>Submit for Owner Approval</span>
+                      </Button>
+                    )}
+                    <Button variant="secondary" disabled>
+                      <Lock size={14} />
+                      <span>Approve (Owner Only)</span>
                     </Button>
-                    <Link className="button button-secondary" to={`/title-to-short/${selected.id}`}>
-                      <Film size={15} /><span>Re-render / Edit Scenes</span>
-                    </Link>
-                  </div>
-                </>
-              ) : (
-                <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
-                  <p className="vault-helper-text">Submitted for Owner/Admin review. Members cannot upload directly to YouTube.</p>
-                  <Link className="button button-secondary" to={`/title-to-short/${selected.id}`}>Re-render / Edit Scenes</Link>
-                </div>
-              )}
-            </div>
+                  </>
+                )}
+                <Button
+                  variant="secondary"
+                  type="button"
+                  onClick={() => {
+                    const text = `${selected.title}\n\n${selected.script || ""}\n\n#Shorts`;
+                    navigator.clipboard?.writeText(text).then(() => setStatus("Copied Title & Description for manual upload.")).catch(() => {});
+                  }}
+                >
+                  <span>Copy Title &amp; Description</span>
+                </Button>
+                <Link to={`/title-to-short/${selected.id}`}>
+                  <Button variant="secondary">Open Script &amp; Scenes</Button>
+                </Link>
+              </div>
+            </section>
           )}
         </div>
       )}

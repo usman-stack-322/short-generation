@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from app.core.config import settings
-from app.core.security import require_editor, new_id
+from app.core.security import require_admin, new_id
 from app.core.vault import decrypt
 from app.database.session import get_db
 from app.models import Channel, ChannelAuthorization, WorkspaceMember
@@ -16,7 +16,7 @@ router = APIRouter(prefix='/api/youtube', tags=['YouTube'])
 
 
 @router.get('/connect')
-def connect(response: Response, context=Depends(require_editor), db: Session=Depends(get_db)):
+def connect(response: Response, context=Depends(require_admin), db: Session=Depends(get_db)):
     url, browser, _ = oauth.begin(db, context[1])
     response.set_cookie('youtube_oauth_browser', browser, max_age=600, httponly=True,
                         secure=settings.google_redirect_uri.startswith('https://'), samesite='lax', path='/api/youtube')
@@ -27,8 +27,8 @@ def connect(response: Response, context=Depends(require_editor), db: Session=Dep
 def callback(request: Request, state: str, code: str | None=None, error: str | None=None, db: Session=Depends(get_db)):
     record = oauth.consume_state(db, state, request.cookies.get('youtube_oauth_browser'))
     member = db.get(WorkspaceMember, record.member_id)
-    if not member or not member.active or member.role == 'VIEWER':
-        raise HTTPException(403, 'Active editor/owner membership required')
+    if not member or not member.active or member.role not in {'OWNER', 'ADMIN'}:
+        raise HTTPException(403, 'Active owner/admin membership required')
     if error or not code:
         raise HTTPException(400, 'Google authorization was declined or incomplete')
     client = oauth.flow(state, decrypt(record.verifier))
@@ -82,7 +82,7 @@ class ChannelRequest(InputModel):
 
 
 @router.post('/disconnect')
-def disconnect(payload: ChannelRequest, context=Depends(require_editor), db: Session=Depends(get_db)):
+def disconnect(payload: ChannelRequest, context=Depends(require_admin), db: Session=Depends(get_db)):
     channel = db.get(Channel, payload.channel_id)
     channel_access(channel, context[1], True)
     record = db.query(ChannelAuthorization).filter_by(channel_id=channel.id).first()
@@ -94,7 +94,7 @@ def disconnect(payload: ChannelRequest, context=Depends(require_editor), db: Ses
 
 
 @router.post('/health')
-def health(payload: ChannelRequest, context=Depends(require_editor), db: Session=Depends(get_db)):
+def health(payload: ChannelRequest, context=Depends(require_admin), db: Session=Depends(get_db)):
     channel = db.get(Channel, payload.channel_id)
     channel_access(channel, context[1], True)
     try:

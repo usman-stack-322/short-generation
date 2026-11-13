@@ -15,7 +15,7 @@ def migrate_database():
     tables = inspect(engine).get_table_names()
     with engine.connect() as connection:
         version = connection.execute(text('SELECT version_num FROM alembic_version')).scalar() if 'alembic_version' in tables else None
-    if version == '0017_celebrity_vault':
+    if version == '0018_workspace_invites':
         return
     if engine.dialect.name == 'sqlite' and engine.url.database and Path(engine.url.database).is_file() and tables:
         backups=root/'backups'
@@ -38,5 +38,5 @@ def migrate_database():
 
 if __name__ == '__main__':
     migrate_database()
-    print('Database is at 0017_celebrity_vault. Existing data preserved; pre-upgrade SQLite backup retained.')
+    print('Database is at 0018_workspace_invites. Existing data preserved; pre-upgrade SQLite backup retained.')
 

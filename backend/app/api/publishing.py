@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
-from app.core.security import require_editor, new_id
+from app.core.security import require_admin, new_id
 from app.core.config import settings
 from app.database.session import get_db
 from app.models import UploadTask, Channel, Analytics
@@ -93,7 +93,7 @@ def queue_upload(db,job,member,payload,schedule=False):
 
 
 @router.post('/{job_id}/upload')
-def upload_video(job_id:str,payload:PublishInput,background:BackgroundTasks,context=Depends(require_editor),db:Session=Depends(get_db)):
+def upload_video(job_id:str,payload:PublishInput,background:BackgroundTasks,context=Depends(require_admin),db:Session=Depends(get_db)):
     job=job_access(db,job_id,context[1],True)
     if payload.scheduled_at:
         raise HTTPException(422,'Use the schedule endpoint for future uploads')
@@ -103,7 +103,7 @@ def upload_video(job_id:str,payload:PublishInput,background:BackgroundTasks,cont
 
 
 @router.post('/{job_id}/resume-upload')
-def resume_upload(job_id:str,background:BackgroundTasks,context=Depends(require_editor),db:Session=Depends(get_db)):
+def resume_upload(job_id:str,background:BackgroundTasks,context=Depends(require_admin),db:Session=Depends(get_db)):
     if not settings.youtube_uploads_enabled:raise HTTPException(409,'YouTube uploads disabled')
     job=job_access(db,job_id,context[1],True)
     task=db.query(UploadTask).filter_by(job_id=job.id,status='pending',requested_by=context[1].id).first()
@@ -113,7 +113,7 @@ def resume_upload(job_id:str,background:BackgroundTasks,context=Depends(require_
 
 
 @router.post('/{job_id}/approve-upload')
-def approve_upload(job_id:str,payload:PublishInput,context=Depends(require_editor),db:Session=Depends(get_db)):
+def approve_upload(job_id:str,payload:PublishInput,context=Depends(require_admin),db:Session=Depends(get_db)):
     raise HTTPException(422,'Approve the reviewed video first, then explicitly choose Upload Privately to YouTube')
     if not payload.confirmed:
         raise HTTPException(422,'Final confirmation required')
@@ -123,12 +123,12 @@ def approve_upload(job_id:str,payload:PublishInput,context=Depends(require_edito
 
 
 @router.post('/{job_id}/schedule')
-def schedule_video(job_id:str,payload:PublishInput,context=Depends(require_editor),db:Session=Depends(get_db)):
+def schedule_video(job_id:str,payload:PublishInput,context=Depends(require_admin),db:Session=Depends(get_db)):
     return queue_upload(db,job_access(db,job_id,context[1],True),context[1],payload,True)
 
 
 @router.post('/{job_id}/cancel-schedule')
-def cancel(job_id:str,context=Depends(require_editor),db:Session=Depends(get_db)):
+def cancel(job_id:str,context=Depends(require_admin),db:Session=Depends(get_db)):
     job=job_access(db,job_id,context[1],True)
     task=db.query(UploadTask).filter_by(job_id=job.id).first()
     if not task or task.status not in {'scheduled','pending'}:
@@ -145,7 +145,7 @@ class ReconcileInput(InputModel):
 
 
 @router.post('/{job_id}/verify-upload')
-def verify(job_id:str,context=Depends(require_editor),db:Session=Depends(get_db)):
+def verify(job_id:str,context=Depends(require_admin),db:Session=Depends(get_db)):
     from app.youtube.upload import verify_upload
     job=job_access(db,job_id,context[1],True)
     task=db.query(UploadTask).filter_by(job_id=job.id).first()
@@ -156,7 +156,7 @@ def verify(job_id:str,context=Depends(require_editor),db:Session=Depends(get_db)
 
 
 @router.post('/{job_id}/reconcile-upload')
-def reconcile(job_id:str,payload:ReconcileInput,context=Depends(require_editor),db:Session=Depends(get_db)):
+def reconcile(job_id:str,payload:ReconcileInput,context=Depends(require_admin),db:Session=Depends(get_db)):
     from app.youtube.oauth import youtube,credentials_for
     job=job_access(db,job_id,context[1],True)
     task=db.query(UploadTask).filter_by(job_id=job.id).first()
@@ -194,7 +194,7 @@ def reconcile(job_id:str,payload:ReconcileInput,context=Depends(require_editor),
 
 
 @router.post('/{job_id}/analytics/sync')
-def analytics(job_id:str,context=Depends(require_editor),db:Session=Depends(get_db)):
+def analytics(job_id:str,context=Depends(require_admin),db:Session=Depends(get_db)):
     from app.youtube.oauth import youtube,credentials_for
     job=job_access(db,job_id,context[1])
     task=db.query(UploadTask).filter_by(job_id=job.id,status='uploaded').first()

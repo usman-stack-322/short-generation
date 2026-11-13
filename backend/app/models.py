@@ -518,3 +518,21 @@ class TitleShortDraft(Base):
     error_message = Column(Text)
     created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False)
+
+
+class WorkspaceInvite(Base):
+    __tablename__ = 'workspace_invites'
+
+    id = Column(String, primary_key=True)
+    workspace_id = Column(String, ForeignKey('workspaces.id'), nullable=False, index=True)
+    created_by_user_id = Column(String, ForeignKey('users.id'), nullable=False)
+    token_hash = Column(String(64), unique=True, index=True, nullable=False)
+    role = Column(String(20), nullable=False, default='MEMBER')
+    isolated = Column(Boolean, default=False, server_default='0', nullable=False)
+    label = Column(String(120), default='', server_default='', nullable=False)
+    target_email = Column(String(255))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True))
+    used_by_user_id = Column(String, ForeignKey('users.id'))
+    revoked = Column(Boolean, default=False, server_default='0', nullable=False)
+    created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)

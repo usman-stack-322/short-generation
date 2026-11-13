@@ -1,32 +1,342 @@
-import { useState } from 'react';
-import { usePollingResource } from '../hooks/usePollingResource';
-import { Link } from 'react-router-dom';
-import { api, mediaUrl } from '../services/api';
-import { PageHeader } from '../components/Shell';
-import { Button, Notice, Loading } from '../components/UI';
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import {
+  CheckCircle2,
+  Download,
+  Film,
+  Lock,
+  Plus,
+  Search,
+  Send,
+  Trash2,
+  XCircle,
+} from "lucide-react";
+import { api, mediaUrl } from "../services/api";
+import { PageHeader } from "../components/Shell";
+import { Button, Loading, Notice } from "../components/UI";
 
-const tabs=[['all','All'],['verification_required','Needs Research'],['generating','Generating'],['ready_for_review','Ready for Review'],['approved','Approved'],['scheduled','Scheduled'],['uploaded','Uploaded'],['failed','Failed'],['rejected','Rejected']];
-const generating=['researching','script_generation','collecting_assets','voice_generation','rendering','creating_cover','uploading'];
-const nextAction = row => ['verification_required','research_ready'].includes(row.status) ? 'Review research' : ['failed','upload_failed'].includes(row.status) ? 'Recover job' : generating.includes(row.status) ? 'View progress' : row.status==='ready_for_review' ? 'Review Short' : 'Open Short';
-export default function Videos(){
-  const {data,setData:setRows,error:pollError,loaded}=usePollingResource('/videos');
-  const rows=data || [];
-  const [error,setError]=useState(''),[status,setStatus]=useState('all'),[classification,setClassification]=useState('all');
-  const [channel,setChannel]=useState(''),[personality,setPersonality]=useState(''),[member,setMember]=useState(''),[date,setDate]=useState('');
-  const role=localStorage.getItem('role');
-  const options=key=>[...new Set(rows.map(row=>row[key]).filter(Boolean))];
-  const visible=rows.filter(row=>(classification==='all'||(classification==='test'?row.research_trace?.operator_is_test===true:row.research_trace?.operator_is_test!==true))&&(status==='all'||(status==='generating'?generating.includes(row.status):status==='verification_required'?['verification_required','research_ready'].includes(row.status):status==='failed'?['failed','upload_failed'].includes(row.status):row.status===status))&&(!channel||row.channel_name===channel)&&(!personality||row.personality_name===personality)&&(!member||row.member_name===member)&&(!date||row.created_at?.slice(0,10)===date));
-  const clearFilters=()=>{setStatus('all');setChannel('');setPersonality('');setMember('');setDate('');setClassification('all');};
-  async function remove(id){if(!window.confirm('Delete this local job and its media permanently?'))return;try{await api(`/videos/${id}`,{method:'DELETE'});setRows(old=>old.filter(row=>row.id!==id));}catch(err){setError(err.message);}}
-  return <><PageHeader eyebrow="CONTENT PIPELINE" title="Video queue" description="Research, generation, approval, scheduling, and upload history." action={role!=='VIEWER'&&<Link to="/create"><Button>Create a Short</Button></Link>}/><Notice>{error || pollError}</Notice>
-    {!loaded&&!pollError&&<Loading/>}
-    {!loaded&&pollError&&<p>Could not load the queue. Retrying automatically…</p>}
-    <div className="queue-tabs day2-tabs" role="tablist">{tabs.map(([key,label])=><button role="tab" aria-selected={status===key} key={key} className={status===key?'active':''} onClick={()=>setStatus(key)}>{label}</button>)}</div>
-    <div className="queue-filters"><label>Job label<select value={classification} onChange={e=>setClassification(e.target.value)}><option value="all">All jobs</option><option value="production">Not marked as test</option><option value="test">Explicitly marked test</option></select></label><label>Channel<select value={channel} onChange={e=>setChannel(e.target.value)}><option value="">All channels</option>{options('channel_name').map(v=><option key={v}>{v}</option>)}</select></label><label>Personality<select value={personality} onChange={e=>setPersonality(e.target.value)}><option value="">All personalities</option>{options('personality_name').map(v=><option key={v}>{v}</option>)}</select></label>{role==='OWNER'&&<label>Member<select value={member} onChange={e=>setMember(e.target.value)}><option value="">All members</option>{options('member_name').map(v=><option key={v}>{v}</option>)}</select></label>}<label>Created date (UTC)<input type="date" value={date} onChange={e=>setDate(e.target.value)}/></label></div>
-    {loaded&&!visible.length&&<section className="panel settings-section"><h2>{rows.length?'No videos match these filters.':'No videos yet.'}</h2><p>{rows.length?'Try another status or clear filters.':'Create a Short to start your queue.'}</p><Button variant="secondary" onClick={clearFilters}>Clear filters</Button></section>}
-    <div className="queue-list">{visible.map(row=><article key={row.id} className="queue-card panel"><img className="queue-thumb" src={mediaUrl(row.thumbnail_url)||'/cover-placeholder.svg'} alt="Video cover" onError={e=>{e.currentTarget.src='/cover-placeholder.svg';}}/><div className="queue-main"><div className="queue-topline"><span className={`status-pill status-${row.status}`}>{row.status.replaceAll('_',' ')}</span><span>{row.created_at&&new Date(row.created_at).toLocaleString()} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</span></div><h2>{row.seo?.title||row.topic||'Research in progress'}</h2><p>{row.channel_name} · {row.personality_name} · {row.duration}s · {row.language_name || row.language_code || row.language}</p>{generating.includes(row.status)&&<p>Working: {row.current_step.replaceAll('_',' ')}{row.upload&&` · ${Math.round(row.upload.progress*100)}%`}</p>}{row.upload?.scheduled_at&&<p>Scheduled: {new Date(row.upload.scheduled_at).toLocaleString()} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</p>}<p>Stage: {(row.current_step || row.status).replaceAll('_',' ')}</p>{row.error_message&&<details className="queue-error"><summary>Needs attention — open this job for recovery</summary>{row.error_message}</details>}{row.upload?.youtube_url&&<a href={row.upload.youtube_url} target="_blank" rel="noreferrer">YouTube ↗</a>}</div><div className="queue-actions">{role!=='VIEWER'&&<Button variant="secondary" onClick={async()=>{try{const updated=await api(`/videos/${row.id}/classification`,{method:'PATCH',body:JSON.stringify({is_test:!row.research_trace?.operator_is_test})});setRows(old=>old.map(r=>r.id===updated.id?updated:r));}catch(e){setError(e.message);}}}>{row.research_trace?.operator_is_test?'Unmark test':'Mark as test'}</Button>}<Link to={`/videos/${row.id}`} className="button button-secondary">{nextAction(row)}</Link>{role==='OWNER'&&!['uploaded','uploading','scheduled',...generating].includes(row.status)&&<Button variant="secondary" onClick={()=>remove(row.id)}>Delete</Button>}</div></article>)}</div>
-  </>;
+const FILTER_TABS = [
+  ["all", "All Shorts"],
+  ["pending_review", "Pending Approval"],
+  ["approved", "Approved & Ready"],
+  ["rejected", "Changes Requested"],
+  ["rendering", "Drafts / Rendering"],
+];
+
+function statusLabel(reviewStatus) {
+  switch (reviewStatus) {
+    case "pending_review":
+      return "Pending Approval";
+    case "approved":
+      return "Approved";
+    case "rejected":
+      return "Changes Requested";
+    case "uploaded":
+      return "Uploaded";
+    case "rendering":
+      return "Rendering";
+    default:
+      return "Draft";
+  }
 }
 
+export default function Videos() {
+  const role = localStorage.getItem("role") || "MEMBER";
+  const isAdmin = ["OWNER", "ADMIN"].includes(role);
+  const [shorts, setShorts] = useState(null);
+  const [filter, setFilter] = useState("all");
+  const [query, setQuery] = useState("");
+  const [busyId, setBusyId] = useState("");
+  const [error, setError] = useState("");
+  const [banner, setBanner] = useState("");
 
+  async function loadAll() {
+    try {
+      const shortRows = await api("/title-shorts");
+      setShorts(shortRows);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
 
+  useEffect(() => {
+    loadAll();
+    const timer = setInterval(loadAll, 12000);
+    return () => clearInterval(timer);
+  }, []);
+
+  async function submitForReview(id) {
+    setBusyId(id);
+    setError("");
+    setBanner("");
+    try {
+      await api(`/projects/${id}/submit-review`, { method: "POST" });
+      setBanner("Submitted to workspace owner for approval. Download unlocks once approved.");
+      await loadAll();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function reviewShort(id, action) {
+    const note =
+      action === "reject"
+        ? window.prompt("Optional note explaining requested changes:", "Please revise voiceover or scenes")
+        : "Approved";
+    if (action === "reject" && note === null) return;
+    setBusyId(id);
+    setError("");
+    setBanner("");
+    try {
+      await api(`/projects/${id}/review`, {
+        method: "POST",
+        body: JSON.stringify({ action, note: note || "" }),
+      });
+      setBanner(
+        action === "approve"
+          ? "Short approved! Download is now unlocked for the creator."
+          : "Changes requested on short."
+      );
+      await loadAll();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function deleteShort(item) {
+    if (!window.confirm(`Delete "${item.title}" permanently?`)) return;
+    setBusyId(item.id);
+    setError("");
+    setBanner("");
+    try {
+      await api(`/title-shorts/${item.id}`, { method: "DELETE" });
+      setBanner(`Deleted "${item.title}".`);
+      await loadAll();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  if (error && !shorts) return <Notice>{error}</Notice>;
+  if (!shorts) return <Loading />;
+
+  const q = query.trim().toLowerCase();
+  const visibleShorts = shorts.filter((item) => {
+    const st = item.review_status || "draft";
+    if (filter === "rendering") {
+      if (!["rendering", "draft"].includes(st)) return false;
+    } else if (filter !== "all" && st !== filter) {
+      return false;
+    }
+    if (!q) return true;
+    return (
+      item.title.toLowerCase().includes(q) ||
+      (item.creator_name || "").toLowerCase().includes(q) ||
+      item.language.toLowerCase().includes(q)
+    );
+  });
+
+  return (
+    <div>
+      <PageHeader
+        eyebrow={isAdmin ? "WORKSPACE SHORTS LIBRARY" : "MY SHORTS & DOWNLOADS"}
+        title={isAdmin ? "All Workspace Videos" : "My Videos & Downloads"}
+        description={
+          isAdmin
+            ? "Review, download, approve, or clean up shorts created across your workspace."
+            : "Your created shorts only. Downloads unlock automatically once your workspace owner approves them."
+        }
+        action={
+          <Link to="/title-to-short">
+            <Button>
+              <Plus size={16} />
+              <span>Create Short</span>
+            </Button>
+          </Link>
+        }
+      />
+
+      {error && <Notice>{error}</Notice>}
+      {banner && <Notice type="success">{banner}</Notice>}
+
+      <div className="vault-filter-bar" style={{ marginBottom: 18 }}>
+        <div className="vault-search-wrap studio-input-icon-wrap">
+          <span className="studio-input-icon">
+            <Search size={15} />
+          </span>
+          <input
+            aria-label="Search shorts"
+            style={{ paddingLeft: 36 }}
+            placeholder={isAdmin ? "Search title, language, or creator..." : "Search your shorts..."}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+        <div className="vault-pill-group">
+          {FILTER_TABS.map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              className={`filter-pill ${filter === key ? "active" : ""}`}
+              onClick={() => setFilter(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {visibleShorts.length === 0 ? (
+        <section className="studio-card">
+          <div className="empty-state">
+            <div className="empty-icon">
+              <Film size={20} />
+            </div>
+            <strong>No matching shorts found</strong>
+            <p>
+              {shorts.length === 0
+                ? "Create your first AI Short from any title to preview, submit for approval, and download."
+                : "Try switching filter tabs or clearing your search box."}
+            </p>
+            <Link to="/title-to-short">
+              <Button>
+                <Plus size={15} />
+                <span>Create Short</span>
+              </Button>
+            </Link>
+          </div>
+        </section>
+      ) : (
+        <div className="studio-video-grid">
+          {visibleShorts.map((item) => {
+            const st = item.review_status || "draft";
+            const canDownload = isAdmin || ["approved", "uploaded"].includes(st);
+            const downloadHref = item.video_url
+              ? mediaUrl(`${item.video_url}&download=true`)
+              : null;
+
+            return (
+              <article key={item.id} className="studio-video-card">
+                <div className="studio-action-row" style={{ justifyContent: "space-between" }}>
+                  <span className={`studio-badge ${st}`}>{statusLabel(st)}</span>
+                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    {item.language} · {item.output_duration ? `${Math.round(item.output_duration)}s` : `${item.duration}s`}
+                  </span>
+                </div>
+
+                {item.video_url && (
+                  <div className="studio-video-preview">
+                    <video
+                      key={item.video_url}
+                      controls
+                      preload="metadata"
+                      src={mediaUrl(item.video_url)}
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <h3 style={{ margin: "0 0 6px", fontSize: 15, lineHeight: 1.35 }}>
+                    {item.title}
+                  </h3>
+                  <div className="studio-action-row">
+                    {isAdmin && item.creator_name && (
+                      <span className="mood-tag">Creator: {item.creator_name}</span>
+                    )}
+                    <span className="mood-tag">{item.style}</span>
+                  </div>
+                  {item.review_note && (
+                    <p className="studio-subtext" style={{ marginTop: 8 }}>
+                      Note: {item.review_note}
+                    </p>
+                  )}
+                </div>
+
+                <div className="studio-action-row" style={{ marginTop: "auto" }}>
+                  <Link to={`/title-to-short/${item.id}`}>
+                    <Button variant="secondary">Open Editor</Button>
+                  </Link>
+
+                  {!isAdmin && item.status === "ready" && ["draft", "rejected"].includes(st) && (
+                    <Button
+                      loading={busyId === item.id}
+                      onClick={() => submitForReview(item.id)}
+                    >
+                      <Send size={13} />
+                      <span>Submit for Approval</span>
+                    </Button>
+                  )}
+
+                  {isAdmin && item.status === "ready" && st === "pending_review" && (
+                    <>
+                      <Button
+                        loading={busyId === item.id}
+                        onClick={() => reviewShort(item.id, "approve")}
+                      >
+                        <CheckCircle2 size={13} />
+                        <span>Approve</span>
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        loading={busyId === item.id}
+                        onClick={() => reviewShort(item.id, "reject")}
+                      >
+                        <XCircle size={13} />
+                        <span>Reject</span>
+                      </Button>
+                    </>
+                  )}
+
+                  {item.video_url && canDownload && (
+                    <>
+                      <a href={downloadHref} download={`short-${item.id}.mp4`}>
+                        <Button>
+                          <Download size={13} />
+                          <span>Download MP4</span>
+                        </Button>
+                      </a>
+                      <Button
+                        variant="secondary"
+                        type="button"
+                        onClick={() => {
+                          const text = `${item.title}\n\n${item.script || ""}\n\n#Shorts`;
+                          navigator.clipboard?.writeText(text).then(() => setBanner(`Copied title & script for "${item.title}".`)).catch(() => {});
+                        }}
+                      >
+                        <span>Copy Title pack</span>
+                      </Button>
+                    </>
+                  )}
+
+                  {item.video_url && !canDownload && (
+                    <span className="studio-lock-pill">
+                      <Lock size={12} />
+                      <span>Locked until approved</span>
+                    </span>
+                  )}
+
+                  {(isAdmin || ["draft", "rejected"].includes(st)) && (
+                    <Button
+                      variant="danger"
+                      loading={busyId === item.id}
+                      onClick={() => deleteShort(item)}
+                      title={isAdmin ? "Delete short permanently" : "Remove unsubmitted draft"}
+                    >
+                      <Trash2 size={13} />
+                    </Button>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

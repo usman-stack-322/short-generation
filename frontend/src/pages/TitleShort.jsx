@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, mediaUrl } from '../services/api';
 import { PageHeader } from '../components/Shell';
 import { Button } from '../components/UI';
-import { Film, FolderOpen, Image as ImageIcon, Search, Upload } from 'lucide-react';
+import { Film, FolderOpen, Image as ImageIcon, Search, Trash2, Upload } from 'lucide-react';
 import './TitleShort.css';
 
 const active = new Set(['analyzing','researching','research_verification','script','validating','visuals','voiceover','rendering']);
@@ -22,8 +22,13 @@ export default function TitleShort() {
     caption_style:'viral_gold',
   });
   const narratorTouched = useRef(false);
-  const [collections,setCollections]=useState([]),[channels,setChannels]=useState([]),[localMedia,setLocalMedia]=useState([]);
-  useEffect(()=>{Promise.all([api('/library/collections'),api('/channels')]).then(([c,ch])=>{setCollections(c);setChannels(ch);}).catch(e=>setError(e.message));},[]);
+  const userRole = localStorage.getItem('role') || 'MEMBER';
+  const isAdmin = ['OWNER', 'ADMIN'].includes(userRole);
+  const [collections,setCollections]=useState([]),[localMedia,setLocalMedia]=useState([]);
+  const [reviewBusy,setReviewBusy]=useState(false),[reviewNotice,setReviewNotice]=useState('');
+  useEffect(()=>{
+    api('/library/collections').then(c=>setCollections(c)).catch(e=>setError(e.message));
+  },[]);
   const [sourceText,setSourceText] = useState('');
   const [capabilities,setCapabilities] = useState(null);
   const [draft,setDraft] = useState(null);
@@ -231,6 +236,68 @@ export default function TitleShort() {
     );
   };
 
+  async function submitForReview() {
+    if (!id) return;
+    setReviewBusy(true);
+    setError('');
+    setReviewNotice('');
+    try {
+      await api('/projects/' + id + '/submit-review', { method: 'POST' });
+      const row = await api('/title-shorts/' + id);
+      setDraft(row);
+      setReviewNotice('Submitted for workspace owner approval. Download unlocks once approved.');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
+  async function approveDraft() {
+    if (!id) return;
+    setReviewBusy(true);
+    setError('');
+    setReviewNotice('');
+    try {
+      await api('/projects/' + id + '/review', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'approve', note: 'Approved from Title to Short editor' }),
+      });
+      const row = await api('/title-shorts/' + id);
+      setDraft(row);
+      setReviewNotice('Short approved! Final MP4 download is now unlocked for the creator.');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
+  const canDownload = isAdmin || ['approved', 'uploaded'].includes(draft?.review_status);
+  const canRemoveDraft = (row) => !!row && !active.has(row.status) && (isAdmin || ['draft', 'rejected'].includes(row.review_status || 'draft'));
+
+  async function removeDraft(targetId, title, navigateHome = false) {
+    if (!window.confirm(`Remove draft "${title || 'this draft'}" permanently?`)) return;
+    setBusy(true);
+    setError('');
+    setReviewNotice('');
+    try {
+      await api('/title-shorts/' + targetId, { method: 'DELETE' });
+      const rows = await api('/title-shorts');
+      setHistory(rows || []);
+      if (navigateHome) {
+        request.current = null;
+        navigate('/title-to-short');
+      } else {
+        setReviewNotice(`Removed draft "${title || targetId}".`);
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="title-short-page">
       <PageHeader
@@ -296,13 +363,6 @@ export default function TitleShort() {
               <option value="prefer_images">Prefer Images (.jpg/.png/.webp)</option>
             </select>
           </div>
-          <div className="studio-field">
-            <label className="studio-label" htmlFor="create-channel">My Channel (optional until upload)</label>
-            <select id="create-channel" value={form.channel_id||''} onChange={e=>setForm({...form,channel_id:e.target.value||null})}>
-              <option value="">Choose later</option>
-              {channels.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </div>
         </div>
 
         {['local','mixed'].includes(form.media_mode)&&<div className="studio-field">
@@ -347,7 +407,14 @@ export default function TitleShort() {
       {id&&!draft&&!error&&<p role="status">Loading draft…</p>}
 
       {draft&&<>
-        <h2 style={{marginTop:16}}>{draft.title}</h2>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap',marginTop:16}}>
+          <h2 style={{margin:0}}>{draft.title}</h2>
+          {canRemoveDraft(draft)&&(
+            <Button variant="danger" disabled={running} onClick={()=>removeDraft(draft.id, draft.title, true)}>
+              <Trash2 size={14} /><span>Remove Draft</span>
+            </Button>
+          )}
+        </div>
         {draft.scope?.required&&<section className="studio-card" style={{marginBottom:20}} aria-label="Revised scope review">
           <h3 style={{marginTop:0}}>Revised scope — acceptance required</h3>
           <p><b>Original input (preserved):</b> {draft.title}</p>
@@ -376,7 +443,7 @@ export default function TitleShort() {
           {steps.map(([key,label],index)=><li key={key} aria-current={key===stage?'step':undefined} className={key===stage?'current':stageIndex>index||draft.status==='ready'?'done':''}>{label}{key===stage&&running?'…':''}</li>)}
         </ol>
         <div role="status" className="title-short-info">
-          {draft.status==='script_review'?'Review scenes, swap celebrity photos/clips, and choose transitions below before rendering.':draft.status==='ready'?'Short ready for preview, review queue, and YouTube upload.':draft.status==='failed'?'Generation stopped. Saved drafts and earlier renders are preserved.':draft.status.replaceAll('_',' ')}
+          {draft.status==='script_review'?'Review scenes, swap celebrity photos/clips, and choose transitions below before rendering.':draft.status==='ready'?'Short ready for preview, review queue, and MP4 download.':draft.status==='failed'?'Generation stopped. Saved drafts and earlier renders are preserved.':draft.status.replaceAll('_',' ')}
         </div>
         {draft.research_failure_code&&<p role="status"><b>{draft.research_failure_code==='search_failed'?'Search service unavailable':draft.research_failure_code==='analysis_service_failed'?'AI evidence service unavailable':'Evidence insufficient'}</b> — saved script edits and prior renders are preserved.</p>}
         {draft.ai_fallback_mode&&<div role="status" className="title-short-info" style={{marginBottom:12}}><b>Source-grounded quota fallback active:</b> Live AI hit its rate limit, so this draft was assembled directly from fetched real sources. Review and edit the narration below before rendering.</div>}
@@ -525,21 +592,60 @@ export default function TitleShort() {
         {draft.video_url&&<section className="studio-card" style={{marginBottom:20}}>
           <h3>Final 9:16 Preview &amp; Export</h3>
           <video className="title-short-video" key={draft.video_url} controls preload="metadata" src={mediaUrl(draft.video_url)} />
-          <p>{draft.output_duration?.toFixed(2)}s actual · {draft.voice?.provider} · {draft.voice?.voice} · Status: <b>{draft.review_status}</b></p>
-          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-            <a className="button button-primary" href={mediaUrl(draft.video_url+'&download=true')}>Download MP4</a>
-            <Link className="button button-secondary" to="/review-queue">Open Review Queue</Link>
+          <p>{draft.output_duration?.toFixed(2)}s actual · {draft.voice?.provider} · {draft.voice?.voice} · Approval status: <b>{draft.review_status}</b></p>
+          {reviewNotice&&<div className="notice notice-success" role="status">{reviewNotice}</div>}
+          {draft.review_note&&<div className="notice notice-info">Owner note: {draft.review_note}</div>}
+          <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+            {canDownload
+              ? <a className="button button-primary" href={mediaUrl(draft.video_url+'&download=true')} download={`short-${draft.id}.mp4`}>Download Final MP4</a>
+              : <span className="studio-lock-pill">Download locked until Owner approves</span>}
+            {canDownload && (
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => {
+                  const text = `${draft.title}\n\n${draft.script || ''}\n\n#Shorts`;
+                  navigator.clipboard?.writeText(text).then(() => setReviewNotice('Copied Title & Script to clipboard.')).catch(() => {});
+                }}
+              >
+                Copy Title &amp; Script
+              </Button>
+            )}
+            {!isAdmin && draft.status==='ready' && !['approved','uploaded'].includes(draft.review_status) && (
+              <Button loading={reviewBusy} onClick={submitForReview}>
+                {draft.review_status==='pending_review' ? 'Refresh Approval Request' : 'Submit for Owner Approval'}
+              </Button>
+            )}
+            {isAdmin && draft.status==='ready' && !['approved','uploaded'].includes(draft.review_status) && (
+              <Button loading={reviewBusy} onClick={approveDraft}>Approve &amp; Unlock for Team</Button>
+            )}
+            {isAdmin && <Link className="button button-secondary" to="/review-queue">Open Review Queue</Link>}
             <a className="button button-secondary" href={mediaUrl(draft.credits_url+'&download=true')}>Download photo credits</a>
             <a className="button button-secondary" href={mediaUrl(draft.sources_url+'&download=true')}>Download research sources</a>
           </div>
         </section>}
 
-        {draft.render_history.length>0&&<details className="title-short-panel"><summary>Preserved renders</summary>{draft.render_history.map(v=><p key={v.revision}>Version {v.revision}: <a href={mediaUrl(v.video_url)} target="_blank" rel="noreferrer">Preview</a> · <a href={mediaUrl(v.video_url+'&download=true')}>Download</a></p>)}</details>}
+        {draft.render_history.length>0&&<details className="title-short-panel"><summary>Preserved renders</summary>{draft.render_history.map(v=><p key={v.revision}>Version {v.revision}: <a href={mediaUrl(v.video_url)} target="_blank" rel="noreferrer">Preview</a>{canDownload && <> · <a href={mediaUrl(v.video_url+'&download=true')}>Download</a></>}</p>)}</details>}
       </>}
 
       {!id&&history.length>0&&<section className="studio-card" style={{marginTop:20}}>
         <h3 style={{marginTop:0}}>Recent Title Drafts</h3>
-        {history.map(row=><p key={row.id}><Link to={'/title-to-short/'+row.id}>{row.title}</Link> · <span className={'status-badge '+(row.review_status||'draft')}>{row.review_status||row.status.replaceAll('_',' ')}</span></p>)}
+        {reviewNotice&&<div className="notice notice-success" role="status" style={{marginBottom:12}}>{reviewNotice}</div>}
+        <div style={{display:'grid',gap:10}}>
+          {history.map(row=>(
+            <div key={row.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,padding:'10px 12px',borderRadius:10,border:'1px solid var(--line)',background:'var(--surface-alt)'}}>
+              <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+                <Link to={'/title-to-short/'+row.id} style={{fontWeight:600}}>{row.title}</Link>
+                <span className={'status-badge '+(row.review_status||'draft')}>{row.review_status||row.status.replaceAll('_',' ')}</span>
+              </div>
+              {canRemoveDraft(row)&&(
+                <Button variant="danger" disabled={busy} onClick={()=>removeDraft(row.id, row.title, false)} title="Remove draft">
+                  <Trash2 size={14} /><span>Remove</span>
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
       </section>}
 
       {vaultPickerScene&&<div className="studio-modal-backdrop" role="dialog" aria-modal="true">

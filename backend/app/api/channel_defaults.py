@@ -5,7 +5,7 @@ from fastapi import APIRouter,Depends,HTTPException
 from pydantic import BaseModel,Field,field_validator,ConfigDict
 from sqlalchemy.orm import Session
 from app.database.session import get_db
-from app.core.security import require_owner,current_context
+from app.core.security import require_admin
 from app.models import WorkspaceSettings,Channel
 from app.core.languages import language_info
 from app.tts.director import VoiceSelection
@@ -74,12 +74,12 @@ def apply_channel(channel,defaults,explicit=None):
 
 
 @router.get('')
-def read(context=Depends(current_context),db:Session=Depends(get_db)):
+def read(context=Depends(require_admin),db:Session=Depends(get_db)):
     return {'defaults':saved_defaults(db,context[1].workspace_id),'presets':PRESETS}
 
 
 @router.put('')
-def save(payload:Defaults,context=Depends(require_owner),db:Session=Depends(get_db)):
+def save(payload:Defaults,context=Depends(require_admin),db:Session=Depends(get_db)):
     if payload.posting_start>=payload.posting_end:raise HTTPException(422,'Posting window start must precede end')
     row=db.get(WorkspaceSettings,context[1].workspace_id)
     if not row:row=WorkspaceSettings(workspace_id=context[1].workspace_id,data='{}');db.add(row)
@@ -94,7 +94,7 @@ class Apply(BaseModel):
 
 
 @router.post('/apply')
-def apply(payload:Apply,context=Depends(require_owner),db:Session=Depends(get_db)):
+def apply(payload:Apply,context=Depends(require_admin),db:Session=Depends(get_db)):
     rows=db.query(Channel).filter(Channel.workspace_id==context[1].workspace_id,Channel.member_id==context[1].id,Channel.id.in_(payload.channel_ids)).all()
     if len(rows)!=len(set(payload.channel_ids)):raise HTTPException(404,'Workspace channel not found')
     if payload.defaults.posting_start>=payload.defaults.posting_end:raise HTTPException(422,'Invalid posting window')
