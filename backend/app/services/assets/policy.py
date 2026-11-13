@@ -20,7 +20,7 @@ def photo_supported(item):
     text = normalized(' '.join(str(item.get(k, '')) for k in ('title','description','categories')))
     forbidden = ('ai generated','ai enhanced','ai assisted','midjourney','stable diffusion','dall e','deepfake','faceswap','face swapped','computer generated','photomontage','artificial intelligence','synthetic','face swap','illustration','drawing','painting','rendering','composite','collage','screenshot','watermark removal','digitally manipulated')
     return not any(term in text for term in forbidden) and (
-        item.get('source') in {'pexels', 'pixabay', 'openverse', 'lexica'} or any(term in text for term in ('photograph','photo taken','photo of','photographs'))
+        item.get('source') in {'pexels', 'pixabay', 'openverse'} or any(term in text for term in ('photograph','photo taken','photo of','photographs'))
         or bool(item.get('camera_make') and item.get('camera_model')))
 
 

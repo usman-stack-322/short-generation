@@ -134,8 +134,40 @@ def generate_script(topic, personality, tone, duration, language="en", source_co
         allowed=[kind for kind,pattern in CLAIMS.items() if re.search(pattern,supported,re.I)]
         forbidden=[kind for kind in CLAIMS if kind not in allowed]
         prompt+='\nCLAIM_BOUNDARY: Supported event categories: '+', '.join(allowed)+'. Do not introduce these unsupported categories, even as editorial background: '+', '.join(forbidden)+'. Do not add career changes, debut/launch, records, contracts or performance analysis unless explicitly in the supplied excerpts. Keep significance descriptive; do not add new biographical facts. Repeat the dated outcome in original concise phrasing rather than adding unverified context.'
+    from app.ai.reliability import GeminiGenerationError
+    from app.ai.smart_router import run_structured_ai, parse_gemini_keys
+    from pydantic import BaseModel, Field
     provider=GeminiProvider()
-    result=provider.generate(prompt)
+    used_label=''
+    try:
+        result=provider.generate(prompt)
+        used_label=f'Gemini ({provider.retry_policy.model_used})'
+    except GeminiGenerationError as exc:
+        has_backup=bool(
+            len(parse_gemini_keys())>1
+            or (getattr(settings,'groq_api_key','') or '').strip()
+            or ((getattr(settings,'openai_compat_base_url','') or '').strip() and (getattr(settings,'openai_compat_model','') or '').strip())
+            or (getattr(settings,'ollama_model','') or '').strip()
+        )
+        if not has_backup or 'quota or rate limit' not in str(exc).lower():
+            raise
+        class _SceneItem(BaseModel):
+            visual_query:str
+            narration:str=''
+        class _ScriptOut(BaseModel):
+            hook:str
+            context:str
+            main_story:str
+            why_it_matters:str
+            ending:str
+            full_script:str
+            visual_keywords:list[str]=Field(min_length=1)
+            scenes:list[_SceneItem]=Field(min_length=6,max_length=12)
+        raw_out=run_structured_ai(prompt,_ScriptOut)
+        result=parse_script(json.dumps({k:raw_out[k] for k in FIELDS}))
+        result['visual_keywords']=raw_out['visual_keywords']
+        result['scene_suggestions']=raw_out['scenes']
+        used_label='Backup AI Provider'
     if historical:
         context=json.loads(source_context);year=(context.get('event_date') or '')[:4]
         if not year or year not in result['full_script'] or re.search(r'\b(today|breaking|currently|this season|latest news)\b',result['full_script'],re.I):
@@ -151,7 +183,7 @@ def generate_script(topic, personality, tone, duration, language="en", source_co
         date=(context.get('publication_date') or '')[:10]
         if not date or date not in narration:
             raise ValueError('Review draft must include the publication date in YYYY-MM-DD format.')
-    return result, f'Gemini ({provider.retry_policy.model_used})'
+    return result, (used_label or f'Gemini ({provider.retry_policy.model_used})')
 
 def generate_seo(topic, personality, script, language='en-US',source_context=None):
     language=language_info(language).code

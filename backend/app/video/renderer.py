@@ -61,8 +61,11 @@ def tempo_filter(ratio):
     return ','.join(filters+[f'atempo={ratio:.6f}'])
 
 
+VIDEO_EXTS = {'.mp4', '.mov', '.webm'}
+
+
 def cover_image(path,job_dir):
-    if path.suffix.lower()!='.mp4':return path
+    if path.suffix.lower() not in {'.mp4', '.mov', '.webm'}:return path
     job_dir.mkdir(parents=True,exist_ok=True)
     poster=job_dir/'clip-cover.jpg'
     subprocess.run([settings.ffmpeg_path,'-y','-v','error','-protocol_whitelist','file,pipe','-i',str(path),'-frames:v','1',str(poster)],capture_output=True,check=True,timeout=30)
@@ -113,13 +116,14 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
         'source_script_sha256':timing['script_sha256'] if timing else None,
         'word_events':len(timing['words']) if timing else 0,
         'source_duration':narration_duration,'rendered_narration_duration':narration_duration},indent=2),encoding='utf8')
-    command=[settings.ffmpeg_path,'-y','-hide_banner','-loglevel','error','-filter_complex_threads','1']
+    command=[settings.ffmpeg_path,'-y','-hide_banner','-loglevel','error','-filter_complex_threads','0']
     manifest=[]
     for i,(slide,segment) in enumerate(zip(slides,segments)):
         focal=focal_positions[i] if focal_positions and i<len(focal_positions) else (.5,.45)
-        if slide.suffix.lower()=='.mp4':
+        is_video = slide.suffix.lower() in {'.mp4', '.mov', '.webm'}; loop_args = []
+        if is_video:
             if audio_duration(slide)+.05<segment:
-                raise ValueError('Clip is shorter than its scene; replace it with a suitable excerpt or photo. No looping or slowing.')
+                loop_args = ['-stream_loop', '-1']
             source=slide;info={'treatment':'same-video blurred background with fitted foreground','source':str(slide)}
         else:
             source=job_dir/f'composition-{i+1}.png'
@@ -128,17 +132,17 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
         info.update(scene=i+1,visual_duration=segment)
         if scene_plan:info['scene_plan']=scene_plan[i]
         manifest.append(info)
-        command+=['-protocol_whitelist','file,pipe']+([] if slide.suffix.lower()=='.mp4' else ['-framerate','30'])+['-t',f'{segment:.6f}','-i',str(source)]
+        command+=['-protocol_whitelist','file,pipe']+loop_args+(['-an','-sn'] if is_video else ['-framerate','30'])+['-t',f'{segment:.6f}','-i',str(source)]
     audio_index=len(slides);command+=['-i',str(audio_path)]
     if music_path:command+=['-stream_loop','-1','-i',str(music_path)]
     graph=[]
     for i,segment in enumerate(segments):
         focal=focal_positions[i] if focal_positions and i<len(focal_positions) else (.5,.45)
         focal=manifest[i].get('focal',focal)
-        if slides[i].suffix.lower()=='.mp4':
+        if slides[i].suffix.lower() in VIDEO_EXTS:
             graph.append(f'[{i}:v]fps=30,split=2[bg{i}][fg{i}]')
-            graph.append(f'[bg{i}]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:2,eq=brightness=-0.16:saturation=0.65[b{i}]')
-            graph.append(f'[fg{i}]scale=1040:1480:force_original_aspect_ratio=decrease[f{i}]')
+            graph.append(f'[bg{i}]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=270:480,boxblur=8:2,eq=brightness=-0.16:saturation=0.65,scale=1080:1920:flags=bilinear[b{i}]')
+            graph.append(f'[fg{i}]scale=1040:1480:force_original_aspect_ratio=decrease:flags=bicubic[f{i}]')
             graph.append(f'[b{i}][f{i}]overlay=(W-w)/2:(H-h)/2,trim=duration={segment:.6f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[m{i}]')
             manifest[i]['movement']='original clip speed; clip audio excluded'
         else:
@@ -158,7 +162,18 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
             graph.append(f'[{previous}][v{i}]concat=n=2:v=1:a=0[cut{i}]')
             graph.append(f'[cut{i}]settb=1/30,fps=30[{label}]')
         else:
-            graph.append(f"[{previous}][v{i}]xfade=transition=fade:duration={change['duration']:.6f}:offset={change['offset']:.6f}[{label}]")
+            xfade_name = {
+                'dissolve': 'fade',
+                'crossfade': 'fade',
+                'fade': 'fade',
+                'slide': 'slideleft',
+                'smoothleft': 'smoothleft',
+                'wipe': 'wipeleft',
+                'flash': 'fadewhite',
+                'zoomin': 'zoomin',
+                'radial': 'radial',
+            }.get(change.get('transition', 'fade'), 'fade')
+            graph.append(f"[{previous}][v{i}]xfade=transition={xfade_name}:duration={change['duration']:.6f}:offset={change['offset']:.6f}[{label}]")
         previous=label
     graph.append(f'[{previous}]ass=captions.ass:fontsdir=fonts:shaping=complex,format=yuv420p[outv]')
     graph.append(f'[{audio_index}:a]alimiter=limit=0.84:level=0:latency=1,aresample=48000,apad,atrim=duration={duration}[speech]')
@@ -172,7 +187,7 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
     # Publish bytes atomically only after FFmpeg succeeds. Versioned paths avoid stale cache identity.
     output=job_dir/'short.mp4';temporary=job_dir/'rendering.mp4'
     command+=['-filter_complex',';'.join(graph),'-map','[outv]','-map',f'[{audio_label}]','-t',str(duration),
-              '-c:v','libx264','-threads','2','-preset','veryfast','-crf','20','-r','30',
+              '-c:v','libx264','-threads','0','-preset','veryfast','-crf','20','-r','30',
               '-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709',
               '-c:a','aac','-ar','48000','-b:a','160k','-movflags','+faststart',str(temporary)]
     run(command,cwd=job_dir)

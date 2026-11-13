@@ -32,7 +32,7 @@ def _faces(path):
     return result
 
 
-def resolve_font(code,text):
+def resolve_font(code, text, preferred_fonts=()):
     language=language_info(code)
     if language.rtl and not features.check_feature('raqm'):
         raise RuntimeError(f'{language.name} rendering requires Pillow with libraqm shaping support.')
@@ -40,8 +40,9 @@ def resolve_font(code,text):
     roots=[BACKEND_DIR/'fonts',Path(os.environ.get('WINDIR','C:/Windows'))/'Fonts',
            Path('/usr/share/fonts/truetype/dejavu'),Path('/usr/share/fonts/truetype/noto'),
            Path('/usr/share/fonts/opentype/noto')]
-    for root in roots:
-        for name in language.font_files:
+    candidates = tuple(dict.fromkeys([*preferred_fonts, *language.font_files])) if preferred_fonts else language.font_files
+    for name in candidates:
+        for root in roots:
             path=root/name
             if path.is_file():
                 for face,coverage in _faces(path.resolve()):

@@ -3,15 +3,25 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, mediaUrl } from '../services/api';
 import { PageHeader } from '../components/Shell';
 import { Button } from '../components/UI';
+import { Film, FolderOpen, Image as ImageIcon, Search, Upload } from 'lucide-react';
 import './TitleShort.css';
 
 const active = new Set(['analyzing','researching','research_verification','script','validating','visuals','voiceover','rendering']);
 const steps = [['analyzing','Analyze'],['researching','Research'],['script','Script review'],['visuals','Visuals'],['voiceover','Voiceover'],['rendering','Render']];
+
 export default function TitleShort() {
   const { id } = useParams();
   const navigate = useNavigate();
   const request = useRef(null);
-  const [form,setForm] = useState({title:'',duration:45,language:'English',style:'educational'});
+  const visualsRequested = useRef(new Set());
+  const [form,setForm] = useState({
+    title:'',duration:45,language:'English',style:'educational',
+    media_mode:'online',media_preference:'mix_both',
+    narrator:'automatic',voice:'',
+    voice_style:'Newscaster',voice_pace:'Rapid',voice_accent:'American English',
+    caption_style:'viral_gold',
+  });
+  const narratorTouched = useRef(false);
   const [collections,setCollections]=useState([]),[channels,setChannels]=useState([]),[localMedia,setLocalMedia]=useState([]);
   useEffect(()=>{Promise.all([api('/library/collections'),api('/channels')]).then(([c,ch])=>{setCollections(c);setChannels(ch);}).catch(e=>setError(e.message));},[]);
   const [sourceText,setSourceText] = useState('');
@@ -22,12 +32,23 @@ export default function TitleShort() {
   const [history,setHistory] = useState([]);
   const [texts,setTexts] = useState([]);
   const [instructions,setInstructions] = useState({});
+  const [vaultLibrary,setVaultLibrary] = useState(null);
+  const [vaultPickerScene,setVaultPickerScene] = useState(null);
+  const [vaultSearch,setVaultSearch] = useState('');
+  useEffect(()=>{api('/assets/library').then(setVaultLibrary).catch(()=>{});},[id]);
   const [dirty,setDirty] = useState(false);
   const [scopeConsent,setScopeConsent] = useState(false);
   useEffect(()=>setScopeConsent(false),[draft?.revision]);
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState('');
-  useEffect(()=>{api('/title-shorts/capabilities').then(setCapabilities).catch(e=>setError(e.message));},[]);
+  useEffect(()=>{
+    api('/title-shorts/capabilities').then(caps=>{
+      setCapabilities(caps);
+      if(!narratorTouched.current && caps?.voices?.some(v=>v.provider==='gemini_tts')){
+        setForm(f=>f.narrator==='automatic' ? {...f,narrator:'gemini_tts',voice:'Charon'} : f);
+      }
+    }).catch(e=>setError(e.message));
+  },[]);
   useEffect(()=>{if(draft)setSourceText((draft.source_urls||[]).join('\n'));},[draft?.id]);
   useEffect(()=>{ let live=true; api('/title-shorts').then(rows=>{if(live)setHistory(rows);}).catch(e=>{if(live)setError(e.message);}); return()=>{live=false;}; },[id]);
   useEffect(()=>{
@@ -43,91 +64,520 @@ export default function TitleShort() {
   // Polling updates never overwrite unsaved local narration edits.
   useEffect(()=>{if(draft&&!dirty)setTexts(draft.scenes.map(s=>s.narration));},[draft,dirty]);
   const running=busy||active.has(draft?.status);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (!running) { setElapsedSec(0); return; }
+    setElapsedSec(0);
+    const tick = setInterval(() => setElapsedSec(s => s + 1), 1000);
+    return () => clearInterval(tick);
+  }, [running, draft?.status]);
+
   async function action(path,body,method='POST') {
     setBusy(true);setError('');
     try {
       const row=await api('/title-shorts'+path,{method,body:JSON.stringify(body)});
       setDirty(false);setDraft(row);
-
       return row;
     } catch(e){setError(e.message);} finally{setBusy(false);}
   }
-  // Start polling again when an action moves the current draft into a worker stage.
+
   useEffect(()=>{
     if(!draft||!active.has(draft.status))return;
     let live=true;
     const timer=setInterval(()=>api('/title-shorts/'+draft.id).then(row=>{if(live)setDraft(row);}).catch(e=>{if(live)setError(e.message);}),2000);
     return()=>{live=false;clearInterval(timer);};
   },[draft?.id,draft?.status]);
-  async function create(event){event.preventDefault();const payload={...form,source_urls:sourceText.split(/\n/).map(s=>s.trim()).filter(Boolean)};const fingerprint=JSON.stringify(payload);if(request.current?.fingerprint!==fingerprint)request.current={fingerprint,id:crypto.randomUUID()};const row=await action('',{...payload,request_id:request.current.id});if(row)navigate('/title-to-short/'+row.id);}
+
+  // Automatically fetch online visuals for scenes in script_review when missing.
+  useEffect(()=>{
+    if(!draft||draft.status!=='script_review'||draft.media_mode==='local'||draft.error_message||busy)return;
+    if(!draft.scenes?.some(s=>!s.preview_url))return;
+    const key=draft.id+':'+draft.revision;
+    if(visualsRequested.current.has(key))return;
+    visualsRequested.current.add(key);
+    action('/'+draft.id+'/visuals',{revision:draft.revision});
+  },[draft?.id,draft?.status,draft?.revision,draft?.media_mode,draft?.error_message,busy]);
+
+  async function uploadSceneMedia(sceneNumber, file, vaultAssetId='') {
+    setBusy(true); setError('');
+    try {
+      const fd = new FormData();
+      if (file) fd.append('file', file);
+      if (vaultAssetId) fd.append('vault_asset_id', vaultAssetId);
+      const row = await api('/projects/'+id+'/scenes/'+sceneNumber+'/upload-media', { method: 'POST', body: fd });
+      setDirty(false); setDraft(row); setVaultPickerScene(null);
+    } catch(e) { setError(e.message); } finally { setBusy(false); }
+  }
+
+  async function create(event){
+    event.preventDefault();
+    const payload={...form,source_urls:sourceText.split(/\n/).map(s=>s.trim()).filter(Boolean)};
+    const fingerprint=JSON.stringify(payload);
+    if(request.current?.fingerprint!==fingerprint)request.current={fingerprint,id:crypto.randomUUID()};
+    const row=await action('',{...payload,request_id:request.current.id});
+    if(row)navigate('/title-to-short/'+row.id);
+  }
+
   const rawStage=draft?.status==='failed'?draft.failed_step:draft?.status;
   const stage=rawStage==='research_verification'?'researching':['script_review','validating'].includes(rawStage)?'script':rawStage;
   const stageIndex=steps.findIndex(([key])=>key===stage);
-  return <div className="title-short-page">
-    <PageHeader eyebrow="AI CREATION" title="Title to AI Short" description="One title. One compelling angle. A researched short you review before rendering." action={<Link className="button button-secondary" to="/title-to-short" onClick={()=>{request.current=null;}}>New short</Link>} />
-    <div className="title-short-info">Vertical 9:16 • 30, 45 or 60 seconds • Sources kept separately • Uploads disabled</div>
-    {error&&<div className="notice notice-error" role="alert">{error}</div>}
-    {!id&&<form className="title-short-panel" onSubmit={create}>
-      <label htmlFor="short-title">Video title or topic</label>
-      <textarea id="short-title" required minLength={5} maxLength={500} rows={3} placeholder="The Complete History of Artificial Intelligence" value={form.title} onChange={e=>setForm({...form,title:e.target.value})} />
-      <p>A broad title becomes one focused question, fact or story, rather than a compressed long video.</p>
-      <div className="title-short-controls">
-        <label>Duration<select aria-label="Duration" value={form.duration} onChange={e=>setForm({...form,duration:Number(e.target.value)})}>{[30,45,60].map(v=><option key={v} value={v}>{v} seconds</option>)}</select></label>
-        <label>Language<select aria-label="Language" value={form.language} onChange={e=>setForm({...form,language:e.target.value})}>{['English','Urdu','Roman Urdu'].map(v=><option key={v}>{v}</option>)}</select></label>
-        <label>Style<select aria-label="Style" value={form.style} onChange={e=>setForm({...form,style:e.target.value})}>{['educational','storytelling','documentary'].map(v=><option key={v}>{v}</option>)}</select></label>
-      </div>
-      <label>Media source<select value={form.media_mode||'online'} onChange={e=>setForm({...form,media_mode:e.target.value,online_fallback:false})}><option value="online">Online Sources</option><option value="local">Local Library</option><option value="mixed">Mixed</option></select></label>
-      {['local','mixed'].includes(form.media_mode)&&<label>Personal collection<select required value={form.collection_id||''} onChange={e=>setForm({...form,collection_id:e.target.value})}><option value="">Choose collection</option>{collections.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label>}
-      {form.media_mode==='mixed'&&<label><input type="checkbox" checked={!!form.online_fallback} onChange={e=>setForm({...form,online_fallback:e.target.checked})}/> Allow online fallback when no suitable local image is found</label>}
-      <label>My channel (optional until upload)<select value={form.channel_id||''} onChange={e=>setForm({...form,channel_id:e.target.value||null})}><option value="">Choose later</option>{channels.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
-      <p>Local photos illustrate scenes; they never verify script claims. Confirm people and topic tags in Media Library.</p>
-      <label htmlFor="source-urls">Optional reliable source URLs (one per line)</label><textarea id="source-urls" rows={3} value={sourceText} onChange={e=>setSourceText(e.target.value)} placeholder="https://primary-institution.example/article" /><p>URLs are fetched and verified with the same rules as automatic research. At least two independently originating readable sources are required; syndicated copies count once.</p>
-      <label>Narrator<select aria-label="Narrator" value={form.narrator||'automatic'} onChange={e=>setForm({...form,narrator:e.target.value})}><option value="automatic">Automatic configured narrator</option><option value="local">Installed system narrator</option><option value="kokoro_onnx">Reviewed Kokoro (English only)</option></select></label>
-      {capabilities?.languages[form.language]?.available===false&&<div role="alert" className="notice notice-error">{capabilities.languages[form.language].message}</div>}
-      <Button type="submit" disabled={!capabilities||capabilities.languages[form.language]?.available===false} loading={busy}>Research and draft short</Button>
-      <p>Research finds supporting sources and creates an editable scene plan. Rendering waits for your review.</p>
-    </form>}
-    {id&&!draft&&!error&&<p role="status">Loading draft…</p>}
-    {draft&&<>
-      <h2>{draft.title}</h2>
-      {draft.scope?.required&&<section className="title-short-panel" aria-label="Revised scope review"><h3>Revised scope — acceptance required</h3><p><b>Original input (preserved):</b> {draft.title}</p><p><b>Proposed video title:</b> {draft.scope.proposed_title}</p><p><b>Focused angle:</b> {draft.scope.focus}</p><h4>Omitted because evidence is insufficient</h4>{draft.scope.omissions.map((o,i)=><p key={i}><b>{o.claim}</b> — {o.reason}</p>)}<p>Only independently supported paraphrases are included. Missing transcripts do not block those paraphrases; exact spoken quotes are omitted.</p>{draft.scope_accepted?<p role="status">Revised scope and current saved script accepted. Editing or new research requires acceptance again.</p>:<><label className="title-short-scope-consent"><input type="checkbox" aria-label="Accept revised scope" checked={scopeConsent} disabled={running||dirty} onChange={e=>setScopeConsent(e.target.checked)} /> I accept the revised title, focused scope, omissions and current saved script.</label><Button disabled={running||dirty||!scopeConsent||draft.status!=='script_review'} onClick={()=>action('/'+id+'/scope/accept',{revision:draft.revision})}>Accept revised scope and script</Button><p>Review the complete script below before accepting. Rendering is a separate action.</p></>}</section>}<p>{draft.duration}s target · {draft.language} · {draft.style} · Draft version {draft.revision}</p>
-      <ol className="title-short-progress" aria-label="Generation progress">{steps.map(([key,label],index)=><li key={key} aria-current={key===stage?'step':undefined} className={key===stage?'current':stageIndex>index||draft.status==='ready'?'done':''}>{label}{key===stage&&running?'…':''}</li>)}</ol>
-      <div role="status" className="title-short-info">{draft.status==='script_review'?'Review and edit the narration below. Rendering starts only when you choose Render reviewed short.':draft.status==='ready'?'Short ready for preview and download. Listen and review before sharing.':draft.status==='failed'?'Generation stopped. Saved drafts and earlier renders are preserved.':draft.status.replaceAll('_',' ')}</div>
-      {draft.research_failure_code&&<p role="status"><b>{draft.research_failure_code==='search_failed'?'Search service unavailable':draft.research_failure_code==='analysis_service_failed'?'AI evidence service unavailable':'Evidence insufficient'}</b> — saved script edits and prior renders are preserved.</p>}
-      {draft.error_message&&<div role="alert" className="notice notice-error">{draft.error_message}</div>}
-      {draft.status==='failed'&&<section className="title-short-panel"><label htmlFor="retry-sources">Reliable source URLs (one per line)</label><textarea id="retry-sources" rows={3} value={sourceText} onChange={e=>setSourceText(e.target.value)} /><Button disabled={running||dirty} onClick={()=>action('/'+id+'/sources',{revision:draft.revision,source_urls:sourceText.split(/\n/).map(s=>s.trim()).filter(Boolean)})}>Verify URLs and retry research</Button></section>}
-      {!!draft.research_diagnostics?.length&&<details className="title-short-panel"><summary>Retrieval diagnostics</summary>{draft.research_diagnostics.map((r,i)=><p key={i}>{r.stage}: {r.result||r.feed_title} {r.url} {r.error} {r.reason} {r.detail}</p>)}</details>}
-      {draft.status==='failed'&&['research_verification','script'].includes(draft.failed_step)&&draft.sources.length>0&&<Button disabled={running||dirty} onClick={()=>action('/'+id+'/retry?refresh_sources=false',{revision:draft.revision})}>Recheck retrieved claims and propose supported scope</Button>}
-      {draft.status==='failed'&&<Button disabled={running||dirty} onClick={()=>action('/'+id+'/retry',{revision:draft.revision})}>Retry automatic research (preserve edits)</Button>}
-      {!!draft.research_candidates?.length&&<details className="title-short-panel"><summary>Readable research candidates (not automatically verified)</summary>{draft.research_candidates.map(s=><p key={s.id}><a href={s.url} target="_blank" rel="noreferrer">{s.title}</a><br />Publisher/origin: {s.publisher_group} · {s.independence_group||'unassessed'}</p>)}</details>}
-      {!!draft.primary_media?.length&&<section className="title-short-panel"><h3>Video/podcast leads (authenticity not assumed)</h3>{draft.primary_media.map((m,i)=><p key={i}><a href={m.url} target="_blank" rel="noreferrer">{m.title}</a> · {m.creator}<br />{m.transcript_status} · Metadata does not verify speech.</p>)}</section>}
-      {draft.evidence_review&&<section className="title-short-panel"><h3>Incident evidence review</h3><p>{draft.evidence_review.reason}</p>{!!draft.evidence_review.verified_claims?.length&&<details><summary>Supported context (does not verify the complete title)</summary>{draft.evidence_review.verified_claims.map((c,i)=><p key={i}><b>{c.claim}</b><br />{c.evidence.map((e,j)=><span key={j}><a href={draft.sources.find(s=>s.id===e.source_id)?.url} target="_blank" rel="noreferrer">{e.source_id}, passage {e.passage_id}</a>{j<c.evidence.length-1?' · ':''}</span>)}</p>)}</details>}{draft.evidence_review.quote_checks?.map((q,i)=><p key={i}><b>{q.quote}: {q.verified?'wording/attribution verified':'unverified — excluded'}</b><br />{q.reason}</p>)}{draft.evidence_review.missing_evidence?.map((m,i)=><p key={i}>{m}</p>)}</section>}
-      {draft.analysis&&<section className="title-short-panel"><h3>{draft.research_state==='verified'?'Selected angle':'Proposed angle'}</h3>{!draft.sources.length&&<p>Research must confirm this angle before a script can be written.</p>}<strong>{draft.analysis.angle}</strong><p>{draft.analysis.rationale}</p><p><b>Viewer intent:</b> {draft.analysis.viewer_intent}</p></section>}
-      {!!draft.sources.length&&<section className="title-short-panel"><h3>Research sources</h3><p>{draft.research_state==='failed'?'Previous or candidate sources: latest research has not passed verification.':'Readable source text was checked. Review origin groups and factual support before rendering.'}</p>{draft.sources.map(s=><details key={s.id}><summary>{s.id}: <a href={s.url} target="_blank" rel="noreferrer">{s.title}</a></summary><p>{s.excerpt}</p></details>)}<details><summary>Claim support</summary>{draft.claims.map((c,i)=><p key={i}><b>{c.claim}</b> ({c.source_id})<br />{c.supporting_excerpt}</p>)}</details></section>}
-      {!!draft.scenes.length&&<section className="title-short-panel"><h3>Review script and scenes</h3><p>{draft.status==='ready'?'Scene times follow the final narration.':'Scene times are estimates until final narration supplies native timestamps.'} On-screen summaries are planning notes; the video uses box-free synchronized narration captions.</p>
-        {draft.scenes.map((scene,i)=><article className="title-short-scene" key={scene.number}>
-          <div><h4>Scene {scene.number} · {scene.start.toFixed(1)}–{scene.end.toFixed(1)}s</h4>
-            <label htmlFor={'narration-'+i}>Narration</label><textarea id={'narration-'+i} rows={4} maxLength={1500} dir={draft.language==='Urdu'?'rtl':'ltr'} disabled={running} value={texts[i]??scene.narration} onChange={e=>{const next=[...texts];next[i]=e.target.value;setDirty(true);setTexts(next);}} />
-            <p><b>On-screen summary:</b> {scene.on_screen_text}</p><p><b>Visual plan:</b> {scene.visual_description}</p>
-            <p><b>Photo query:</b> {scene.image_query}<br /><b>Motion:</b> {scene.motion.replaceAll('_',' ')} · {scene.transition}</p>
-            <details><summary>AI image prompt (plan only)</summary><p>{scene.ai_image_prompt}</p><p>AI image generation is not configured. A prompt is not a generated asset or historical evidence.</p></details>
-            <label htmlFor={'scene-instruction-'+i}>Optional regeneration direction</label><input id={'scene-instruction-'+i} maxLength={500} value={instructions[i]||''} disabled={running} onChange={e=>setInstructions({...instructions,[i]:e.target.value})} />
-            <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/regenerate',{revision:draft.revision,instruction:instructions[i]||''})}>Regenerate this scene visual</Button> <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/rewrite',{revision:draft.revision,instruction:instructions[i]||''})}>Rewrite only this scene</Button>
+
+  const updateVoiceSettings = (isDraft, patch) => {
+    if (!isDraft) {
+      narratorTouched.current = true;
+      setForm(f => ({ ...f, ...patch }));
+      return;
+    }
+    action('/'+id+'/narrator', {
+      revision: draft.revision,
+      narrator: patch.narrator ?? (draft.narrator || 'automatic'),
+      voice: patch.voice !== undefined ? patch.voice : (draft.preferred_voice || ''),
+      voice_style: patch.voice_style ?? (draft.voice_style || 'Newscaster'),
+      voice_pace: patch.voice_pace ?? (draft.voice_pace || 'Rapid'),
+      voice_accent: patch.voice_accent ?? (draft.voice_accent || 'American English'),
+      caption_style: patch.caption_style ?? (draft.caption_style || 'viral_gold'),
+    }, 'PUT');
+  };
+
+  const renderVoiceSelect = (isDraft) => {
+    const curNarrator = isDraft ? (draft.narrator||'automatic') : (form.narrator||'automatic');
+    const curLang = isDraft ? draft.language : form.language;
+    const targetProvider = (curNarrator && curNarrator!=='automatic') ? curNarrator : (capabilities?.languages[curLang]?.provider||'kokoro_onnx');
+    const matching = (capabilities?.voices||[]).filter(v=>v.provider===targetProvider && (!v.language || v.language===curLang));
+    const curVoice = isDraft ? (draft.preferred_voice||'') : (form.voice||'');
+    const curStyle = isDraft ? (draft.voice_style||'Newscaster') : (form.voice_style||'Newscaster');
+    const curPace = isDraft ? (draft.voice_pace||'Rapid') : (form.voice_pace||'Rapid');
+    const curAccent = isDraft ? (draft.voice_accent||'American English') : (form.voice_accent||'American English');
+    const curCaption = isDraft ? (draft.caption_style||'viral_gold') : (form.caption_style||'viral_gold');
+    const studio = capabilities?.studio_controls || {};
+    const styles = studio.styles || ['Newscaster','Documentary','Storyteller','Sports Hype','Conversational','Dramatic','Calm & Serious'];
+    const paces = studio.paces || ['Rapid','Fast','Normal','Measured'];
+    const accents = studio.accents || ['American English','British English','Australian English','Canadian English','Indian English','Neutral'];
+    const captionStyles = studio.caption_styles || [
+      {id:'viral_gold',label:'Viral Gold Pop (Bold Highlight)'},
+      {id:'cyan_pop',label:'Electric Cyan Pop'},
+      {id:'clean_broadcast',label:'Newscaster Broadcast'},
+      {id:'classic',label:'Classic Minimal'},
+    ];
+    const locked = isDraft ? (running||dirty) : false;
+
+    return (
+      <>
+        {matching.length>0 && (
+          <div className="studio-field">
+            <label className="studio-label" htmlFor={isDraft?'draft-voice':'create-voice'}>
+              {targetProvider==='gemini_tts' ? 'Google AI Studio Voice' : 'Voice Preset'}
+            </label>
+            <select
+              id={isDraft?'draft-voice':'create-voice'}
+              disabled={locked}
+              value={curVoice}
+              onChange={e => updateVoiceSettings(isDraft, {voice: e.target.value})}
+            >
+              <option value="">Default ({targetProvider==='gemini_tts'?'Charon':(capabilities?.languages[curLang]?.voice||'auto')})</option>
+              {matching.map(v=><option key={v.provider+':'+v.voice} value={v.voice}>{v.label}</option>)}
+            </select>
           </div>
-          <div><label>Replace from my library<select value="" disabled={running||dirty||draft.scene_locks?.includes(scene.number)} onChange={e=>{if(e.target.value)action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,media_id:e.target.value},'PUT');}}><option value="">Select approved image</option>{localMedia.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
-          <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,locked:!draft.scene_locks?.includes(scene.number)},'PUT')}>{draft.scene_locks?.includes(scene.number)?'Unlock image':'Lock image'}</Button>
-          <Button variant="secondary" disabled={running||dirty||draft.scene_locks?.includes(scene.number)} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,exclude:true},'PUT')}>Exclude image</Button>
-          {i>0&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,swap_with:scene.number-1},'PUT')}>Move image earlier</Button>}
+        )}
+        <div className="studio-field">
+          <label className="studio-label" htmlFor={isDraft?'draft-caption-style':'create-caption-style'}>Caption Style</label>
+          <select
+            id={isDraft?'draft-caption-style':'create-caption-style'}
+            disabled={locked}
+            value={curCaption}
+            onChange={e => updateVoiceSettings(isDraft, {caption_style: e.target.value})}
+          >
+            {captionStyles.map(cs=><option key={cs.id} value={cs.id}>{cs.label}</option>)}
+          </select>
+        </div>
+        {targetProvider==='gemini_tts' && (
+          <div className="studio-controls-grid" style={{gridColumn:'1 / -1'}}>
+            <div className="studio-field">
+              <label className="studio-label" htmlFor={isDraft?'draft-voice-style':'create-voice-style'}>Speaking Style</label>
+              <select
+                id={isDraft?'draft-voice-style':'create-voice-style'}
+                disabled={locked}
+                value={curStyle}
+                onChange={e => updateVoiceSettings(isDraft, {voice_style: e.target.value})}
+              >
+                {styles.map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="studio-field">
+              <label className="studio-label" htmlFor={isDraft?'draft-voice-pace':'create-voice-pace'}>Pace</label>
+              <select
+                id={isDraft?'draft-voice-pace':'create-voice-pace'}
+                disabled={locked}
+                value={curPace}
+                onChange={e => updateVoiceSettings(isDraft, {voice_pace: e.target.value})}
+              >
+                {paces.map(p=><option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div className="studio-field">
+              <label className="studio-label" htmlFor={isDraft?'draft-voice-accent':'create-voice-accent'}>Accent</label>
+              <select
+                id={isDraft?'draft-voice-accent':'create-voice-accent'}
+                disabled={locked}
+                value={curAccent}
+                onChange={e => updateVoiceSettings(isDraft, {voice_accent: e.target.value})}
+              >
+                {accents.map(a=><option key={a} value={a}>{a}</option>)}
+              </select>
+            </div>
           </div>
-          <div>{scene.preview_url?<><img src={mediaUrl(scene.preview_url)} alt={scene.asset?.note||scene.visual_description} /><p><a href={scene.asset.source_url} target="_blank" rel="noreferrer">Photo source</a> · {scene.asset.license}<br />{scene.asset.creator}</p><small>{scene.asset.note}</small></>:<p className="title-short-placeholder">Visual not retrieved yet. Generated prompts are not presented as finished visuals.</p>}</div>
-        </article>)}
-        <div className="title-short-actions"><Button variant="secondary" disabled={running||!dirty} onClick={()=>action('/'+id+'/script',{revision:draft.revision,narrations:texts},'PUT')}>Save script edits</Button><Button disabled={running||dirty||!draft.scope_accepted||['failed','in_progress'].includes(draft.research_state)} onClick={()=>action('/'+id+'/render',{revision:draft.revision})}>Render reviewed short</Button></div>
-        {dirty&&<p role="status">Unsaved edits. Save the script before regenerating visuals or rendering. Changes are checked against sources again.</p>}
+        )}
+      </>
+    );
+  };
+
+  return (
+    <div className="title-short-page">
+      <PageHeader
+        eyebrow="AI CREATION"
+        title="Title to AI Short"
+        description="One title. One compelling angle. Authentic celebrity clips and real photography you review before rendering."
+        action={<Link className="button button-secondary" to="/title-to-short" onClick={()=>{request.current=null;}}>New short</Link>}
+      />
+      <div className="title-short-info">Vertical 9:16 • 30, 45 or 60 seconds • Local Celebrity Vault + Real Web Photos • Zero AI Images</div>
+      {error&&<div className="notice notice-error" role="alert">{error}</div>}
+
+      {!id&&<form className="studio-card" onSubmit={create}>
+        <div className="studio-field">
+          <label className="studio-label" htmlFor="short-title">Long Video Title or Topic</label>
+          <textarea
+            id="short-title"
+            required
+            minLength={5}
+            maxLength={500}
+            rows={3}
+            placeholder="e.g. Iman Shumpert GOES OFF On Gilbert Arenas & Swaggy P — DEFENDS Steph Curry!"
+            value={form.title}
+            onChange={e=>setForm({...form,title:e.target.value})}
+          />
+          <span className="vault-helper-text">A broad title becomes one focused question, fact or story rather than a compressed long video.</span>
+        </div>
+
+        <div className="studio-controls-grid">
+          <div className="studio-field">
+            <label className="studio-label" htmlFor="create-duration">Duration</label>
+            <select id="create-duration" value={form.duration} onChange={e=>setForm({...form,duration:Number(e.target.value)})}>
+              {[30,45,60].map(v=><option key={v} value={v}>{v} seconds</option>)}
+            </select>
+          </div>
+          <div className="studio-field">
+            <label className="studio-label" htmlFor="create-language">Language</label>
+            <select id="create-language" value={form.language} onChange={e=>setForm({...form,language:e.target.value})}>
+              {['English','Urdu','Roman Urdu'].map(v=><option key={v}>{v}</option>)}
+            </select>
+          </div>
+          <div className="studio-field">
+            <label className="studio-label" htmlFor="create-style">Style</label>
+            <select id="create-style" value={form.style} onChange={e=>setForm({...form,style:e.target.value})}>
+              {['educational','storytelling','documentary'].map(v=><option key={v}>{v}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="studio-controls-grid">
+          <div className="studio-field">
+            <label className="studio-label" htmlFor="create-media-source">Media Source</label>
+            <select id="create-media-source" value={form.media_mode||'online'} onChange={e=>setForm({...form,media_mode:e.target.value,online_fallback:false})}>
+              <option value="online">Celebrity Folder + Real Web Photos</option>
+              <option value="local">Local Library Only</option>
+              <option value="mixed">Mixed</option>
+            </select>
+          </div>
+          <div className="studio-field">
+            <label className="studio-label" htmlFor="create-media-pref">Visual Preference</label>
+            <select id="create-media-pref" value={form.media_preference||'mix_both'} onChange={e=>setForm({...form,media_preference:e.target.value})}>
+              <option value="mix_both">Mix Both (Images + Short Clips)</option>
+              <option value="prefer_clips">Prefer Video Clips (.mp4/.mov/.webm)</option>
+              <option value="prefer_images">Prefer Images (.jpg/.png/.webp)</option>
+            </select>
+          </div>
+          <div className="studio-field">
+            <label className="studio-label" htmlFor="create-channel">My Channel (optional until upload)</label>
+            <select id="create-channel" value={form.channel_id||''} onChange={e=>setForm({...form,channel_id:e.target.value||null})}>
+              <option value="">Choose later</option>
+              {channels.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {['local','mixed'].includes(form.media_mode)&&<div className="studio-field">
+          <label className="studio-label" htmlFor="create-collection">Personal Collection</label>
+          <select id="create-collection" required value={form.collection_id||''} onChange={e=>setForm({...form,collection_id:e.target.value})}>
+            <option value="">Choose collection</option>
+            {collections.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>}
+
+        {form.media_mode==='mixed'&&<label className="studio-checkbox-row">
+          <input type="checkbox" checked={!!form.online_fallback} onChange={e=>setForm({...form,online_fallback:e.target.checked})}/>
+          <span>Allow real web photo fallback when no suitable local image is found</span>
+        </label>}
+
+        <div className="studio-controls-grid">
+          <div className="studio-field">
+            <label className="studio-label" htmlFor="create-narrator">Narrator Engine</label>
+            <select id="create-narrator" value={form.narrator||'automatic'} onChange={e=>updateVoiceSettings(false,{narrator:e.target.value,voice:e.target.value==='gemini_tts'?'Charon':''})}>
+              {capabilities?.voices?.some(v=>v.provider==='gemini_tts')&&<option value="gemini_tts">Gemini AI Studio (Natural · Style / Pace / Accent)</option>}
+              <option value="automatic">Automatic configured narrator</option>
+              <option value="kokoro_onnx">Kokoro Neural (English only)</option>
+              <option value="local">Installed system narrator</option>
+              {capabilities?.voices?.some(v=>v.provider==='elevenlabs')&&<option value="elevenlabs">ElevenLabs</option>}
+            </select>
+          </div>
+          {renderVoiceSelect(false)}
+        </div>
+
+        <div className="studio-field">
+          <label className="studio-label" htmlFor="source-urls">Optional Reliable Source URLs (one per line)</label>
+          <textarea id="source-urls" rows={3} value={sourceText} onChange={e=>setSourceText(e.target.value)} placeholder="https://www.youtube.com/watch?v=..." />
+          <span className="vault-helper-text">At least two independently originating readable sources are verified automatically alongside optional URLs.</span>
+        </div>
+
+        {capabilities?.languages[form.language]?.available===false&&<div role="alert" className="notice notice-error">{capabilities.languages[form.language].message}</div>}
+        <Button type="submit" disabled={!capabilities||capabilities.languages[form.language]?.available===false} loading={busy}>
+          Research and draft short
+        </Button>
+      </form>}
+
+      {id&&!draft&&!error&&<p role="status">Loading draft…</p>}
+
+      {draft&&<>
+        <h2 style={{marginTop:16}}>{draft.title}</h2>
+        {draft.scope?.required&&<section className="studio-card" style={{marginBottom:20}} aria-label="Revised scope review">
+          <h3 style={{marginTop:0}}>Revised scope — acceptance required</h3>
+          <p><b>Original input (preserved):</b> {draft.title}</p>
+          <p><b>Proposed video title:</b> {draft.scope.proposed_title}</p>
+          <p><b>Focused angle:</b> {draft.scope.focus}</p>
+          <h4>Omitted because evidence is insufficient</h4>
+          {draft.scope.omissions.map((o,i)=><p key={i}><b>{o.claim}</b> — {o.reason}</p>)}
+          <p>Only independently supported paraphrases are included. Missing transcripts do not block those paraphrases; exact spoken quotes are omitted.</p>
+          {draft.scope_accepted
+            ? <p role="status">Revised scope and current saved script accepted. Editing or new research requires acceptance again.</p>
+            : <>
+                <label className="title-short-scope-consent">
+                  <input type="checkbox" aria-label="Accept revised scope" checked={scopeConsent} disabled={running||dirty} onChange={e=>setScopeConsent(e.target.checked)} />
+                  <span>I accept the revised title, focused scope, omissions and current saved script.</span>
+                </label>
+                <div>
+                  <Button disabled={running||dirty||!scopeConsent||draft.status!=='script_review'} onClick={()=>action('/'+id+'/scope/accept',{revision:draft.revision})}>
+                    Accept revised scope and script
+                  </Button>
+                </div>
+              </>}
+        </section>}
+
+        <p>{draft.duration}s target · {draft.language} · {draft.style} · Draft version {draft.revision}</p>
+        <ol className="title-short-progress" aria-label="Generation progress">
+          {steps.map(([key,label],index)=><li key={key} aria-current={key===stage?'step':undefined} className={key===stage?'current':stageIndex>index||draft.status==='ready'?'done':''}>{label}{key===stage&&running?'…':''}</li>)}
+        </ol>
+        <div role="status" className="title-short-info">
+          {draft.status==='script_review'?'Review scenes, swap celebrity photos/clips, and choose transitions below before rendering.':draft.status==='ready'?'Short ready for preview, review queue, and YouTube upload.':draft.status==='failed'?'Generation stopped. Saved drafts and earlier renders are preserved.':draft.status.replaceAll('_',' ')}
+        </div>
+        {draft.research_failure_code&&<p role="status"><b>{draft.research_failure_code==='search_failed'?'Search service unavailable':draft.research_failure_code==='analysis_service_failed'?'AI evidence service unavailable':'Evidence insufficient'}</b> — saved script edits and prior renders are preserved.</p>}
+        {draft.ai_fallback_mode&&<div role="status" className="title-short-info" style={{marginBottom:12}}><b>Source-grounded quota fallback active:</b> Live AI hit its rate limit, so this draft was assembled directly from fetched real sources. Review and edit the narration below before rendering.</div>}
+        {draft.error_message&&<div role="alert" className="notice notice-error">
+          <div>{draft.error_message}</div>
+          {/quota|rate limit|429/i.test(draft.error_message)&&<div style={{marginTop:10,display:'flex',gap:8,flexWrap:'wrap'}}>
+            <Link className="button button-secondary" to="/settings">Open AI Quota &amp; Backup Providers (Extra Keys / Groq / Ollama)</Link>
+          </div>}
+        </div>}
+
+        {draft.status==='failed'&&<section className="studio-card" style={{marginBottom:20}}>
+          <div className="studio-field">
+            <label className="studio-label" htmlFor="retry-sources">Reliable Source URLs (one per line)</label>
+            <textarea id="retry-sources" rows={3} value={sourceText} onChange={e=>setSourceText(e.target.value)} />
+          </div>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+            <Button disabled={running||dirty} onClick={()=>action('/'+id+'/sources',{revision:draft.revision,source_urls:sourceText.split(/\n/).map(s=>s.trim()).filter(Boolean)})}>Verify URLs and retry research</Button>
+            {['research_verification','script'].includes(draft.failed_step)&&draft.sources.length>0&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/retry?refresh_sources=false',{revision:draft.revision})}>Recheck retrieved claims and propose supported scope</Button>}
+            <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/retry',{revision:draft.revision})}>Retry automatic research (preserve edits)</Button>
+          </div>
+        </section>}
+
+        {!!draft.research_diagnostics?.length&&<details className="title-short-panel"><summary>Retrieval diagnostics</summary>{draft.research_diagnostics.map((r,i)=><p key={i}>{r.stage}: {r.result||r.feed_title} {r.url} {r.error} {r.reason} {r.detail}</p>)}</details>}
+        {!!draft.research_candidates?.length&&<details className="title-short-panel"><summary>Readable research candidates (not automatically verified)</summary>{draft.research_candidates.map(s=><p key={s.id}><a href={s.url} target="_blank" rel="noreferrer">{s.title}</a><br />Publisher/origin: {s.publisher_group} · {s.independence_group||'unassessed'}</p>)}</details>}
+        {!!draft.primary_media?.length&&<section className="title-short-panel"><h3>Video/podcast leads (authenticity not assumed)</h3>{draft.primary_media.map((m,i)=><p key={i}><a href={m.url} target="_blank" rel="noreferrer">{m.title}</a> · {m.creator}<br />{m.transcript_status} · Metadata does not verify speech.</p>)}</section>}
+        {draft.evidence_review&&<section className="title-short-panel"><h3>Incident evidence review</h3><p>{draft.evidence_review.reason}</p>{!!draft.evidence_review.verified_claims?.length&&<details><summary>Supported context (does not verify the complete title)</summary>{draft.evidence_review.verified_claims.map((c,i)=><p key={i}><b>{c.claim}</b><br />{c.evidence.map((e,j)=><span key={j}><a href={draft.sources.find(s=>s.id===e.source_id)?.url} target="_blank" rel="noreferrer">{e.source_id}, passage {e.passage_id}</a>{j<c.evidence.length-1?' · ':''}</span>)}</p>)}</details>}{draft.evidence_review.quote_checks?.map((q,i)=><p key={i}><b>{q.quote}: {q.verified?'wording/attribution verified':'unverified — excluded'}</b><br />{q.reason}</p>)}{draft.evidence_review.missing_evidence?.map((m,i)=><p key={i}>{m}</p>)}</section>}
+        {draft.analysis&&<section className="title-short-panel"><h3>{draft.research_state==='verified'?'Selected angle':'Proposed angle'}</h3>{!draft.sources.length&&<p>Research must confirm this angle before a script can be written.</p>}<strong>{draft.analysis.angle}</strong><p>{draft.analysis.rationale}</p><p><b>Viewer intent:</b> {draft.analysis.viewer_intent}</p></section>}
+        {!!draft.sources.length&&<section className="title-short-panel"><h3>Research sources</h3><p>{draft.research_state==='failed'?'Previous or candidate sources: latest research has not passed verification.':'Readable source text was checked. Review origin groups and factual support before rendering.'}</p>{draft.sources.map(s=><details key={s.id}><summary>{s.id}: <a href={s.url} target="_blank" rel="noreferrer">{s.title}</a></summary><p>{s.excerpt}</p></details>)}<details><summary>Claim support</summary>{draft.claims.map((c,i)=><p key={i}><b>{c.claim}</b> ({c.source_id})<br />{c.supporting_excerpt}</p>)}</details></section>}
+
+        {!!draft.scenes.length&&<section className="title-short-panel">
+          <h3>Interactive Scene Storyboard</h3>
+          <p className="vault-helper-text" style={{marginBottom:16}}>
+            {draft.status==='ready'?'Scene times follow the final narration.':'Scene times are estimates until final narration supplies native timestamps.'}
+          </p>
+
+          {draft.scenes.map((scene,i)=>(
+            <article className="storyboard-card" key={scene.number}>
+              <div>
+                <div className="storyboard-head">
+                  <span className="scene-badge">Scene {String(scene.number).padStart(2,'0')} · {scene.start.toFixed(1)}–{scene.end.toFixed(1)}s</span>
+                  {scene.asset?.celebrity_name&&<span className="celeb-pill">{scene.asset.celebrity_name}</span>}
+                  {scene.asset?.provider&&<span className="filter-pill" style={{height:24,fontSize:11,padding:'0 10px'}}>{scene.asset.provider}</span>}
+                </div>
+
+                <div className="studio-field">
+                  <label className="studio-label" htmlFor={'narration-'+i}>Spoken Narration</label>
+                  <textarea id={'narration-'+i} rows={3} maxLength={1500} dir={draft.language==='Urdu'?'rtl':'ltr'} disabled={running} value={texts[i]??scene.narration} onChange={e=>{const next=[...texts];next[i]=e.target.value;setDirty(true);setTexts(next);}} />
+                </div>
+
+                <p style={{fontSize:13,margin:'0 0 8px'}}><b>On-screen caption focus:</b> {scene.on_screen_text}</p>
+                <p style={{fontSize:13,margin:'0 0 12px',color:'#475569'}}><b>Visual plan:</b> {scene.visual_description} · <i>{scene.image_query}</i></p>
+
+                <div className="studio-controls-grid">
+                  <div className="studio-field">
+                    <label className="studio-label" htmlFor={'transition-'+i}>Transition Style</label>
+                    <select id={'transition-'+i} disabled={running||dirty} value={scene.transition||'smoothleft'} onChange={e=>action('/'+id+'/scenes/'+scene.number+'/transition',{revision:draft.revision,transition:e.target.value},'PUT')}>
+                      {[
+                        ['smoothleft','Smooth Slide Left'],
+                        ['slide','Slide Left'],
+                        ['wipe','Wipe Left'],
+                        ['flash','White Flash'],
+                        ['zoomin','Zoom In Transition'],
+                        ['radial','Radial Sweep'],
+                        ['dissolve','Dissolve Fade'],
+                        ['crossfade','Crossfade'],
+                        ['cut','Hard Cut (0s)'],
+                      ].map(([val,lbl])=><option key={val} value={val}>{lbl}</option>)}
+                    </select>
+                  </div>
+                  <div className="studio-field">
+                    <label className="studio-label" htmlFor={'scene-instruction-'+i}>Optional Visual / Rewrite Direction</label>
+                    <input id={'scene-instruction-'+i} maxLength={500} placeholder="e.g. close up interview reaction" value={instructions[i]||''} disabled={running} onChange={e=>setInstructions({...instructions,[i]:e.target.value})} />
+                  </div>
+                </div>
+
+                <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                  <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/regenerate',{revision:draft.revision,instruction:instructions[i]||''})}>Regenerate visual</Button>
+                  <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/rewrite',{revision:draft.revision,instruction:instructions[i]||''})}>Rewrite scene</Button>
+                  <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,locked:!draft.scene_locks?.includes(scene.number)},'PUT')}>{draft.scene_locks?.includes(scene.number)?'Unlock':'Lock'}</Button>
+                  {i>0&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,swap_with:scene.number-1},'PUT')}>Move earlier</Button>}
+                </div>
+              </div>
+
+              <div>
+                <div className="storyboard-preview-frame">
+                  {scene.preview_url
+                    ? (scene.asset?.media_type==='video'
+                        ? <video src={mediaUrl(scene.preview_url)} controls muted loop playsInline />
+                        : <img src={mediaUrl(scene.preview_url)} alt={scene.asset?.note||scene.visual_description} />)
+                    : <span style={{color:'#94a3b8',fontSize:12,padding:16,textAlign:'center'}}>No visual yet</span>}
+                </div>
+                <div className="storyboard-media-actions">
+                  <Button variant="secondary" disabled={running||dirty||draft.scene_locks?.includes(scene.number)} onClick={()=>{setVaultSearch('');setVaultPickerScene(scene.number);}}>
+                    <FolderOpen size={14} /><span>Pick from Vault</span>
+                  </Button>
+                  <label className="button button-secondary" style={{cursor:'pointer',margin:0}}>
+                    <Upload size={14} /><span>Upload Local File</span>
+                    <input type="file" accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm" style={{display:'none'}} disabled={running||dirty||draft.scene_locks?.includes(scene.number)} onChange={e=>{if(e.target.files?.[0])uploadSceneMedia(scene.number,e.target.files[0]);}}/>
+                  </label>
+                  {localMedia.length>0&&<select aria-label={'Replace from library scene '+scene.number} value="" disabled={running||dirty||draft.scene_locks?.includes(scene.number)} onChange={e=>{if(e.target.value)action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,media_id:e.target.value},'PUT');}}>
+                    <option value="">Library image…</option>
+                    {localMedia.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+                  </select>}
+                </div>
+              </div>
+            </article>
+          ))}
+
+          <div className="studio-controls-grid" style={{marginTop:16}}>
+            <div className="studio-field">
+              <label className="studio-label" htmlFor="draft-narrator">Narrator Engine</label>
+              <select id="draft-narrator" disabled={running||dirty} value={draft.narrator||'automatic'} onChange={e=>updateVoiceSettings(true,{narrator:e.target.value,voice:e.target.value==='gemini_tts'?'Charon':''})}>
+                {capabilities?.voices?.some(v=>v.provider==='gemini_tts')&&<option value="gemini_tts">Gemini AI Studio (Natural · Style / Pace / Accent)</option>}
+                <option value="automatic">Automatic configured narrator</option>
+                <option value="kokoro_onnx">Kokoro Neural (High quality, English)</option>
+                <option value="local">System Narrator (Instant &lt;1s, Offline)</option>
+                {capabilities?.voices?.some(v=>v.provider==='elevenlabs')&&<option value="elevenlabs">ElevenLabs (Fast Cloud)</option>}
+              </select>
+            </div>
+            {renderVoiceSelect(true)}
+          </div>
+
+          <div className="title-short-actions" style={{alignItems:'center'}}>
+            <Button variant="secondary" disabled={running||!dirty} onClick={()=>action('/'+id+'/script',{revision:draft.revision,narrations:texts},'PUT')}>Save script edits</Button>
+            {draft.media_mode!=='local'&&draft.scenes.some(s=>!s.preview_url)&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/visuals',{revision:draft.revision})}>Fetch real photos / clips</Button>}
+            <Button disabled={running||dirty||!draft.scope_accepted||['failed','in_progress'].includes(draft.research_state)} onClick={()=>action('/'+id+'/render',{revision:draft.revision})}>
+              {running&&['validating','visuals','voiceover','rendering'].includes(draft?.status)?`Rendering (${draft.status} · ${elapsedSec}s)…`:'Render reviewed short'}
+            </Button>
+            {(() => {
+              const wc = texts.join(' ').trim().split(/\s+/).filter(Boolean).length;
+              const est = Math.round(wc / 2.1);
+              return <span className="studio-hint" style={{fontSize:12,color:'#64748b'}}>{wc} words (~{est}s voice vs {draft.duration}s max)</span>;
+            })()}
+          </div>
+          {running&&['validating','visuals','voiceover','rendering'].includes(draft?.status)&&(
+            <div className="studio-alert" role="status" style={{marginTop:12,background:'#eff6ff',border:'1px solid #bfdbfe',color:'#1e3a8a'}}>
+              {draft.status==='validating'&&`Step 1/4: Checking reviewed script & source alignment (${elapsedSec}s)...`}
+              {draft.status==='visuals'&&`Step 2/4: Verifying scene photos & clips (${elapsedSec}s)...`}
+              {draft.status==='voiceover'&&`Step 3/4: Generating voiceover & word-level timing (${elapsedSec}s)...`}
+              {draft.status==='rendering'&&`Step 4/4: Compositing 9:16 video, transitions & captions via FFmpeg (${elapsedSec}s)...`}
+            </div>
+          )}
+          {dirty&&<p role="status">Unsaved edits. Save the script before regenerating visuals or rendering.</p>}
+        </section>}
+
+        {draft.video_url&&<section className="studio-card" style={{marginBottom:20}}>
+          <h3>Final 9:16 Preview &amp; Export</h3>
+          <video className="title-short-video" key={draft.video_url} controls preload="metadata" src={mediaUrl(draft.video_url)} />
+          <p>{draft.output_duration?.toFixed(2)}s actual · {draft.voice?.provider} · {draft.voice?.voice} · Status: <b>{draft.review_status}</b></p>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+            <a className="button button-primary" href={mediaUrl(draft.video_url+'&download=true')}>Download MP4</a>
+            <Link className="button button-secondary" to="/review-queue">Open Review Queue</Link>
+            <a className="button button-secondary" href={mediaUrl(draft.credits_url+'&download=true')}>Download photo credits</a>
+            <a className="button button-secondary" href={mediaUrl(draft.sources_url+'&download=true')}>Download research sources</a>
+          </div>
+        </section>}
+
+        {draft.render_history.length>0&&<details className="title-short-panel"><summary>Preserved renders</summary>{draft.render_history.map(v=><p key={v.revision}>Version {v.revision}: <a href={mediaUrl(v.video_url)} target="_blank" rel="noreferrer">Preview</a> · <a href={mediaUrl(v.video_url+'&download=true')}>Download</a></p>)}</details>}
+      </>}
+
+      {!id&&history.length>0&&<section className="studio-card" style={{marginTop:20}}>
+        <h3 style={{marginTop:0}}>Recent Title Drafts</h3>
+        {history.map(row=><p key={row.id}><Link to={'/title-to-short/'+row.id}>{row.title}</Link> · <span className={'status-badge '+(row.review_status||'draft')}>{row.review_status||row.status.replaceAll('_',' ')}</span></p>)}
       </section>}
-      {draft.video_url&&<section className="title-short-panel"><h3>Final preview</h3><video className="title-short-video" key={draft.video_url} controls preload="metadata" src={mediaUrl(draft.video_url)} /><p>{draft.output_duration?.toFixed(2)}s actual · {draft.voice?.provider} · {draft.voice?.voice}</p>{draft.voice?.roman_urdu_note&&<p>{draft.voice.roman_urdu_note}</p>}<a className="button button-primary" href={mediaUrl(draft.video_url+'&download=true')}>Download MP4</a> <a className="button button-secondary" href={mediaUrl(draft.credits_url+'&download=true')}>Download photo credits</a> <a className="button button-secondary" href={mediaUrl(draft.sources_url+'&download=true')}>Download research sources</a></section>}
-      {draft.status==='ready'&&draft.video_url&&<form className="title-short-panel form-stack" onSubmit={async e=>{e.preventDefault();const f=new FormData(e.currentTarget);setBusy(true);try{const result=await api('/title-shorts/'+id+'/finalize',{method:'POST',body:JSON.stringify({revision:draft.revision,channel_id:f.get('channel'),title:f.get('title'),description:f.get('description')})});navigate('/videos/'+result.job_id);}catch(err){setError(err.message);}finally{setBusy(false);}}}><h3>Prepare for approval and private upload</h3><label>Destination channel<select name="channel" required defaultValue={draft.channel_id||''}><option value="">Choose my channel</option>{channels.map(c=><option key={c.id} value={c.id}>{c.name} ({c.youtube_channel_id||'not connected'})</option>)}</select></label><label>Video title<input name="title" required maxLength={100} defaultValue={(draft.scope?.proposed_title||draft.title).slice(0,100)}/></label><label>Description<textarea name="description" required maxLength={4000} defaultValue={draft.analysis?.angle||draft.title}/></label><Button loading={busy}>Review rendered video for approval</Button><p>Approval and private upload remain separate actions on the video review page.</p></form>}
-      {draft.render_history.length>0&&<details className="title-short-panel"><summary>Preserved renders</summary>{draft.render_history.map(v=><p key={v.revision}>Version {v.revision}: <a href={mediaUrl(v.video_url)} target="_blank" rel="noreferrer">Preview</a> · <a href={mediaUrl(v.video_url+'&download=true')}>Download</a></p>)}</details>}
-    </>}
-    {!id&&history.length>0&&<section className="title-short-panel"><h3>Recent title drafts</h3>{history.map(row=><p key={row.id}><Link to={'/title-to-short/'+row.id}>{row.title}</Link> · {row.status.replaceAll('_',' ')}</p>)}</section>}
-  </div>;
+
+      {vaultPickerScene&&<div className="studio-modal-backdrop" role="dialog" aria-modal="true">
+        <div className="studio-modal">
+          <div className="studio-modal-header">
+            <h3 style={{margin:0}}>Pick Celebrity Asset for Scene {vaultPickerScene}</h3>
+            <Button variant="secondary" onClick={()=>setVaultPickerScene(null)}>Close</Button>
+          </div>
+          <div className="studio-field">
+            <div className="studio-input-icon-wrap">
+              <span className="studio-input-icon"><Search size={15}/></span>
+              <input style={{paddingLeft:36}} placeholder="Filter celebrities..." value={vaultSearch} onChange={e=>setVaultSearch(e.target.value)} />
+            </div>
+          </div>
+          {!vaultLibrary?.celebrities?.length
+            ? <p>No celebrity assets indexed yet. Visit <Link to="/celebrity-library">Celebrity Folder</Link> to connect a folder.</p>
+            : vaultLibrary.celebrities
+                .filter(c=>!vaultSearch.trim()||c.celebrity_name.toLowerCase().includes(vaultSearch.trim().toLowerCase()))
+                .map(c=><div key={c.celebrity_name} style={{marginTop:16}}>
+                  <h4 style={{margin:'0 0 8px'}}>{c.celebrity_name} ({c.image_count} images · {c.video_count} clips)</h4>
+                  <div className="vault-media-grid">
+                    {c.assets.map(a=>(
+                      <button key={a.id} type="button" className="vault-asset-card" style={{textAlign:'left',cursor:'pointer',padding:0}} onClick={()=>uploadSceneMedia(vaultPickerScene,null,a.id)}>
+                        <div className="vault-media-thumb" style={{height:150}}>
+                          {a.media_type==='video'
+                            ? <video src={mediaUrl(a.preview_url)} muted preload="metadata" />
+                            : <img src={mediaUrl(a.preview_url)} alt={a.file_name} />}
+                        </div>
+                        <div className="vault-asset-meta">
+                          <strong>{a.file_name}</strong>
+                          <span className="mood-tag" style={{marginTop:4,display:'inline-block'}}>{a.media_type}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>)}
+        </div>
+      </div>}
+    </div>
+  );
 }

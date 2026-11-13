@@ -2,6 +2,8 @@ import Account from "./pages/Account";
 import UploadHistory from "./pages/UploadHistory";
 import Analytics from "./pages/Analytics";
 import MediaLibrary from "./pages/MediaLibrary";
+import CelebrityLibrary from "./pages/CelebrityLibrary";
+import ReviewQueue from "./pages/ReviewQueue";
 import { useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/Shell";
@@ -32,6 +34,8 @@ export default function App() {
     <Route path="/" element={auth(<Dashboard />)} />
     <Route path="/analytics" element={auth(<Analytics />)} />
     <Route path="/library" element={auth(<MediaLibrary />)} />
+    <Route path="/celebrity-library" element={auth(<CelebrityLibrary />)} />
+    <Route path="/review-queue" element={auth(<ReviewQueue />)} />
     <Route path="/channels" element={auth(<Channels />)} />
     <Route path="/team" element={auth(["OWNER","ADMIN"].includes(localStorage.getItem("role")) ? <Team /> : <Navigate to="/" replace />)} />
     <Route path="/personalities" element={auth(<Personalities />)} />

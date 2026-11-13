@@ -40,7 +40,8 @@ def compose_photo(path, destination, focal=(.5, .45), protect_top=True, native_l
         treatment = 'same-photo blurred full-bleed background; complete fitted foreground'
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(destination, quality=96, subsampling=0)
+    save_kwargs = {'compress_level': 1} if destination.suffix.lower() == '.png' else {'quality': 96, 'subsampling': 0}
+    canvas.save(destination, **save_kwargs)
     return {'source': str(source), 'source_size': [width, height], 'treatment': treatment,
             'focal': [x, y], 'prepared_path': str(destination), 'native_detail_preserved': native_limit, 'maximum_zoom':max_zoom}
 

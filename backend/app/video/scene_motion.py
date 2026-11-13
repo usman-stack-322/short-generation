@@ -23,8 +23,8 @@ def validate_scene_plan(plan, count):
             raise ValueError('Camera travel must be between zero and twelve percent')
         if motion['type'] == 'hold' and not motion.get('reason'):
             raise ValueError('A still moment needs an editorial reason')
-        if scene.get('transition_in', 'cut') not in {'cut', 'dissolve'}:
-            raise ValueError('Use a clean cut or short dissolve')
+        if scene.get('transition_in', 'cut') not in {'cut', 'dissolve', 'crossfade', 'slide', 'wipe', 'flash', 'zoomin', 'smoothleft', 'radial'}:
+            raise ValueError('Use a clean cut or short transition')
     return plan
 
 def planned_motion(frames, focal, plan):

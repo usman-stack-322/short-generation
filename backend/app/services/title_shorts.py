@@ -12,7 +12,7 @@ from app.models import TitleShortDraft
 from app.core.network import public_get
 from app.research.evergreen import ArticleText
 from app.research.verification import source_metadata
-from app.services.assets.licensed import CommonsAssetProvider,PexelsAssetProvider,PixabayAssetProvider,OpenverseAssetProvider,LexicaAssetProvider,BROWSER_USER_AGENT,download_photo,photo_supported
+from app.services.assets.licensed import CommonsAssetProvider,PexelsAssetProvider,PixabayAssetProvider,OpenverseAssetProvider,BROWSER_USER_AGENT,download_photo,photo_supported
 from app.tts.capabilities import NarrationUnavailable
 from app.tts.providers import generate_narration
 from app.video.renderer import render_video,audio_duration,validate_narration
@@ -40,6 +40,7 @@ class SourceURLs(Strict):
         return values
 class TitleInput(SourceURLs):
     media_mode:Literal['online','local','mixed']='online'
+    media_preference:Literal['mix_both','prefer_clips','prefer_images']='mix_both'
     collection_id:str|None=None
     online_fallback:bool=False
     channel_id:str|None=None
@@ -48,7 +49,12 @@ class TitleInput(SourceURLs):
     duration:Literal[30,45,60]=45
     language:Literal['English','Urdu','Roman Urdu']='English'
     style:Literal['educational','storytelling','documentary']='educational'
-    narrator:Literal['automatic','local','kokoro_onnx']='automatic'
+    narrator:Literal['automatic','local','kokoro_onnx','elevenlabs','google','gemini_tts']='automatic'
+    voice:str=Field(default='',max_length=120)
+    voice_style:str=Field(default='Newscaster',max_length=80)
+    voice_pace:str=Field(default='Rapid',max_length=40)
+    voice_accent:str=Field(default='American English',max_length=60)
+    caption_style:Literal['viral_gold','cyan_pop','clean_broadcast','classic']='viral_gold'
 class Analysis(Strict):
     topic:str=Field(min_length=3,max_length=300)
     viewer_intent:str=Field(min_length=5,max_length=600)
@@ -68,7 +74,7 @@ class PlannedScene(Strict):
     image_query:str=Field(min_length=3,max_length=250)
     ai_image_prompt:str=Field(min_length=5,max_length=900)
     motion:Literal['push_in','pull_out','pan_left','pan_right']='push_in'
-    transition:Literal['cut','dissolve']='dissolve'
+    transition:Literal['cut','dissolve','crossfade','slide','wipe','flash','zoomin','smoothleft','radial']='smoothleft'
 class Plan(Strict):
     scenes:list[PlannedScene]=Field(min_length=3,max_length=8)
     claims:list[Claim]=Field(min_length=1,max_length=20)
@@ -87,23 +93,169 @@ class SceneInput(ActionInput):
 
 
 def ai(prompt,schema):
-    if not settings.gemini_api_key.strip():
-        raise ValueError('Configure GEMINI_API_KEY on the server for title analysis, grounded scripts and scene regeneration. No demo generation is used.')
-    from app.ai.reliability import GeminiRetryPolicy,GeminiGenerationError
-    def request(text,model,fallback):
-        response=httpx.post('https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',
-            headers={'x-goog-api-key':settings.gemini_api_key},json={'contents':[{'parts':[{'text':text}]}],
-            'generationConfig':{'responseMimeType':'application/json','responseJsonSchema':schema.model_json_schema()}},timeout=35,trust_env=False)
-        response.raise_for_status()
-        text=response.json()['candidates'][0]['content']['parts'][0]['text']
-        return schema.model_validate_json(text).model_dump()
-    try:
-        preferred=settings.title_short_ai_model.strip()
-        if preferred and preferred not in {settings.gemini_model,settings.gemini_fallback_model}:
-            raise ValueError('TITLE_SHORT_AI_MODEL must use the configured primary or fallback model.')
-        return GeminiRetryPolicy().execute(request,prompt,primary_model=preferred or None)
-    except GeminiGenerationError as exc:
-        raise ValueError(str(exc)+' No successful title-short generation was recorded.') from None
+    from app.ai.smart_router import has_any_ai_configured, run_structured_ai
+    if not has_any_ai_configured():
+        raise ValueError('Configure GEMINI_API_KEY (or Groq / Ollama) on the server for title analysis, grounded scripts and scene regeneration. No demo generation is used.')
+    preferred=(settings.title_short_ai_model or '').strip() or None
+    return run_structured_ai(
+        prompt,
+        schema,
+        primary_model=preferred,
+        cacheable=(schema is Analysis),
+    )
+
+
+def _local_analysis_from_title(title, duration=45, style='educational'):
+    """Deterministic fallback analysis built strictly from the input title when all AI quotas are exhausted."""
+    from app.services.title_research import lead_from_title, neutral_queries
+    lead = lead_from_title(title)
+    people = lead.get('people') or []
+    cleaned = re.sub(r'[“”"\'!?🔥👀💥🚨]+', ' ', title)
+    cleaned = re.sub(r'\b(?:GOES OFF|GO OFF|SLAMS|DESTROYS|DISSING|BLASTS|EXPOSES|ROASTS)\b', 'discusses', cleaned, flags=re.I)
+    cleaned = ' '.join(cleaned.split())
+    words = [w for w in cleaned.split() if len(w) > 2][:8]
+    topic = ' '.join(people[:3]) if people else (' '.join(words[:4]) or 'Featured Topic')
+    base_query = (' '.join(people) + ' interview reaction').strip() if people else ' '.join(words[:6])
+    queries = list(dict.fromkeys([
+        q for q in [
+            base_query,
+            ' '.join(words[:7]),
+            *(neutral_queries({'search_queries': []}, lead)),
+        ] if q and len(q.strip()) >= 3
+    ]))[:3] or [cleaned[:120] or title[:120]]
+    return {
+        'topic': topic[:280],
+        'viewer_intent': f'Understand the verified background and discussion around {topic[:180]}.',
+        'angle': f'What documented reporting shows about {topic[:220]}?',
+        'rationale': f'Focuses on verifiable reporting around {topic[:180]} suitable for a {duration}-second {style} short.',
+        'search_queries': queries,
+        'people': people[:8],
+        'alleged_claims': [cleaned[:200]] if cleaned else [],
+    }
+
+
+def _extractive_verify_incident(draft, data):
+    """Assemble verifiable claim passages directly from fetched readable sources when AI quota is exhausted."""
+    from app.services.title_research import group_sources, publisher_group
+    sources = data.get('sources') or []
+    eligible = [s for s in sources if s.get('evidence_eligible', True) and len((s.get('excerpt') or '').split()) >= 12]
+    for s in eligible:
+        s.setdefault('publisher_group', publisher_group(s))
+    min_groups = 1 if getattr(draft, 'style', '') in {'storytelling', 'documentary', 'evergreen'} or bool(data.get('source_urls')) or len(eligible) < 2 else 2
+    if group_sources(eligible) < min_groups:
+        return None
+    claims = []
+    for s in eligible[:4]:
+        words = (s.get('excerpt') or '').split()
+        passage = ' '.join(words[:80]).strip()
+        if len(passage.split()) < 10:
+            continue
+        first_sent = re.split(r'(?<=[.!?])\s+', passage)[0].strip()
+        claim_text = first_sent if 20 <= len(first_sent) <= 220 else passage[:180].strip()
+        claims.append({
+            'claim': claim_text,
+            'evidence': [{'source_id': s['id'], 'passage_id': 1, 'excerpt': s['excerpt'][:600]}],
+        })
+    if not claims:
+        return None
+    return {
+        'incident_supported': True,
+        'status': 'verified_extractive_fallback',
+        'reason': 'AI quota was reached; evidence claims were extracted directly from fetched readable sources for manual review.',
+        'verified_claims': claims,
+        'quote_checks': [],
+        'missing_evidence': [],
+        'excluded_claims': [],
+        'independent_groups': sorted({s.get('independence_group', 'src') for s in eligible}),
+    }
+
+
+def _extractive_grounded_plan(draft, data):
+    """Build a strictly source-backed English storyboard directly from fetched sources when AI quota is exhausted."""
+    if draft.language != 'English':
+        return None
+    sources = data.get('sources') or []
+    if not sources:
+        return None
+    scene_count = 3 if draft.duration <= 30 else (4 if draft.duration <= 45 else 5)
+    min_words = round(draft.duration * 1.15) + 4
+    max_words = round(draft.duration * 2.5) - 4
+    target_words = max(min_words + 6, min(max_words - 4, round(draft.duration * 1.85)))
+    per_scene_target = max(12, target_words // scene_count)
+
+    sentences = []
+    for s in sources:
+        body = re.sub(r'[“”"]', '', s.get('excerpt', ''))
+        for sent in re.split(r'(?<=[.!?])\s+', body):
+            clean = ' '.join(sent.split()).strip()
+            if 5 <= len(clean.split()) <= 35:
+                sentences.append((clean, s))
+    if not sentences:
+        return None
+
+    people = (data.get('lead') or {}).get('people') or (data.get('analysis') or {}).get('people') or []
+    lead_subject = people[0] if people else (data.get('analysis', {}).get('topic') or draft.title[:60])
+    motions = ['push_in', 'pan_right', 'pull_out', 'pan_left', 'push_in']
+    transitions = ['smoothleft', 'flash', 'wipe', 'zoomin', 'slide']
+
+    scenes = []
+    used_claims = []
+    idx = 0
+    for i in range(scene_count):
+        narration_parts = []
+        wc = 0
+        src_ref = sources[i % len(sources)]
+        while wc < per_scene_target and idx < len(sentences):
+            sent, src_obj = sentences[idx]
+            idx += 1
+            if wc + len(sent.split()) > per_scene_target + 14 and narration_parts:
+                idx -= 1
+                break
+            narration_parts.append(sent)
+            src_ref = src_obj
+            wc += len(sent.split())
+        if not narration_parts:
+            fallback_words = re.sub(r'[“”"]', '', src_ref.get('excerpt', '')).split()[:per_scene_target]
+            narration = ' '.join(fallback_words).strip()
+            if narration and narration[-1] not in '.!?':
+                narration += '.'
+        else:
+            narration = ' '.join(narration_parts).strip()
+        person_hint = people[i % len(people)] if people else lead_subject
+        excerpt_words = ' '.join(src_ref.get('excerpt', '').split()[:18]).strip()
+        if len(excerpt_words) >= 15:
+            used_claims.append({
+                'claim': f'Source {src_ref["id"]} reported documented context for scene {i + 1}.',
+                'source_id': src_ref['id'],
+                'supporting_excerpt': excerpt_words,
+            })
+        scenes.append({
+            'narration': narration,
+            'on_screen_text': f'{person_hint[:40]} · Context',
+            'visual_description': f'Editorial photo or archival clip featuring {person_hint}',
+            'image_query': f'{person_hint} interview press photo',
+            'ai_image_prompt': f'Editorial archival photograph of {person_hint}',
+            'motion': motions[i % len(motions)],
+            'transition': transitions[i % len(transitions)],
+        })
+
+    total_words = sum(len(sc['narration'].split()) for sc in scenes)
+    if total_words > max_words:
+        ratio = max_words / max(1, total_words)
+        for sc in scenes:
+            w = sc['narration'].split()
+            keep = max(8, int(len(w) * ratio))
+            sc['narration'] = ' '.join(w[:keep]).rstrip(',;:') + '.'
+    elif total_words < min_words:
+        # Pad from unused source words safely
+        extra = ' '.join(re.sub(r'[“”"]', '', sources[0].get('excerpt', '')).split()[: (min_words - total_words + 6)])
+        if extra:
+            scenes[-1]['narration'] = (scenes[-1]['narration'] + ' ' + extra).strip() + '.'
+
+    if not used_claims:
+        s0 = sources[0]
+        used_claims = [{'claim': 'Documented source context.', 'source_id': s0['id'], 'supporting_excerpt': s0['excerpt'][:120].strip()}]
+    return {'scenes': scenes, 'claims': used_claims}
 
 
 def validate_angle(analysis):
@@ -128,17 +280,17 @@ def research(analysis,source_urls=None,diagnostics=None,lead=None,progress=None,
     return sources
 
 
-def narrator_choice(language,selection='automatic'):
+def narrator_choice(language,selection='automatic',preferred_voice=''):
     from app.tts.capabilities import configured,resolve_narrator
     provider=selection if selection!='automatic' else (settings.title_short_tts_provider if settings.title_short_tts_provider!='local' else ('kokoro_onnx' if language=='English' and configured('kokoro_onnx') else 'local'))
-    voice=settings.title_short_voice or ('bm_george' if provider=='kokoro_onnx' else LANGUAGES[language])
+    voice=(preferred_voice or '').strip() or settings.title_short_voice or ('bm_george' if provider=='kokoro_onnx' else LANGUAGES[language])
     narrator=resolve_narrator(provider,LANGUAGES[language],voice)
     return provider,narrator.voice
 
 
-def preflight(language,selection='automatic'):
+def preflight(language,selection='automatic',preferred_voice=''):
     try:
-        provider,voice=narrator_choice(language,selection)
+        provider,voice=narrator_choice(language,selection,preferred_voice)
         return {'available':True,'provider':provider,'voice':voice}
     except Exception:
         return {'available':False,'message':('No compatible '+language+' narrator is available. Install a matching Urdu system narrator or explicitly configure an authorized multilingual generic voice. Research and generation have not started.' if language!='English' else 'No compatible requested English narrator is available. Install a matching system voice or configure the reviewed Kokoro runtime.')}
@@ -153,7 +305,7 @@ def instructions(draft):
         'Use exactly 3 scenes for a 30-second short, 4 for 45 seconds, 5 for 60 seconds. Scene narration concatenates into the entire script, no separate duplicate script. '
         'On-screen text is a brief planning summary; final captions follow the exact narration without extra text cards. '
         'Use concrete scene-specific image queries in English for genuine licensed photos. AI prompts are plans only, never evidence. '
-        'Use consistent archival/editorial photographic style, varied subtle motion and clean transitions. '
+        'Use consistent archival/editorial photographic style, varied subtle motion and dynamic transitions across scenes (mix smoothleft, slide, wipe, flash, zoomin, dissolve rather than flat cuts). '
         'When evidence_review has non-empty verified_claims, use ONLY those verified_claims and exclude unverified quotes/claims. Use past publication month/year for historical incidents, never breaking-news language. '
         'For every factual claim provide source_id and a short exact supporting_excerpt copied from fetched source text. ')
 
@@ -275,82 +427,6 @@ def fetch_openverse_visual(scene, folder, used=None):
     return None
 
 
-def fetch_lexica_visual(scene, folder, used=None):
-    """(b) Lexica Free Image Search (No API Key): query scene keywords and download top portrait/high-res image."""
-    used = used or set()
-    scene_num = scene.get('number', 1)
-    items = LexicaAssetProvider().search(scene.get('image_query', ''))
-    for item in items[:8]:
-        try:
-            resp = httpx.get(item['download_url'], headers={'User-Agent': BROWSER_USER_AGENT}, timeout=15, follow_redirects=True, trust_env=False)
-            if resp.status_code == 200 and len(resp.content) > 4000:
-                with Image.open(io.BytesIO(resp.content)) as source:
-                    source.load()
-                    img = ImageOps.exif_transpose(source).convert('RGB')
-                padded = ImageOps.contain(img, (1080, 1620))
-                canvas = Image.new('RGB', (1080, 1920), '#10141e')
-                canvas.paste(padded, ((1080 - padded.width) // 2, (1920 - padded.height) // 2))
-                out_id = uuid4().hex[:12]
-                out_path = folder / f'lexica_{scene_num}_{out_id}.jpg'
-                canvas.save(out_path, 'JPEG', quality=95)
-                canvas.save(folder / f'lexica_{scene_num}_{out_id}-source.jpg', 'JPEG', quality=95)
-                digest = hashlib.sha256(out_path.read_bytes()).hexdigest()
-                if digest in used:
-                    continue
-                return {
-                    'path': str(out_path),
-                    'hash': digest,
-                    'source_url': item['url'],
-                    'creator': item['creator'],
-                    'license': item['license'],
-                    'license_url': item['license_url'],
-                    'credit': f"Visual via Lexica ({item['title'][:80]}): {item['url']}",
-                    'kind': 'online_visual',
-                    'provider': 'lexica',
-                    'note': 'High-resolution 9:16 scene visual retrieved via Lexica.'
-                }
-        except Exception:
-            continue
-    return None
-
-
-def fetch_pollinations_visual(scene, folder, used=None):
-    """(c) Pollinations Free 9:16 AI Visual Generator (No API Key): 1080x1920 vertical scene visual."""
-    used = used or set()
-    scene_num = scene.get('number', 1)
-    prompt = scene.get('ai_image_prompt') or scene.get('visual_description') or scene.get('image_query') or 'Documentary photograph'
-    pollinations_url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width=1080&height=1920&nologo=true&seed={scene_num}"
-    try:
-        resp = httpx.get(pollinations_url, headers={'User-Agent': BROWSER_USER_AGENT}, timeout=15, follow_redirects=True, trust_env=False)
-        if resp.status_code == 200 and len(resp.content) > 4000:
-            with Image.open(io.BytesIO(resp.content)) as source:
-                source.load()
-                img = ImageOps.exif_transpose(source).convert('RGB')
-            if img.size != (1080, 1920):
-                img = ImageOps.fit(img, (1080, 1920))
-            out_id = uuid4().hex[:12]
-            out_path = folder / f'pollinations_{scene_num}_{out_id}.jpg'
-            img.save(out_path, 'JPEG', quality=95)
-            img.save(folder / f'pollinations_{scene_num}_{out_id}-source.jpg', 'JPEG', quality=95)
-            digest = hashlib.sha256(out_path.read_bytes()).hexdigest()
-            if digest not in used:
-                return {
-                    'path': str(out_path),
-                    'hash': digest,
-                    'source_url': pollinations_url,
-                    'creator': 'Pollinations AI',
-                    'license': 'Public Domain / CC0',
-                    'license_url': 'https://pollinations.ai/',
-                    'credit': f'9:16 AI visual via Pollinations: {prompt[:80]}',
-                    'kind': 'online_ai_visual',
-                    'provider': 'pollinations',
-                    'note': '9:16 vertical scene visual generated via Pollinations.'
-                }
-    except Exception:
-        pass
-    return None
-
-
 def extract_youtube_thumbnail(yt_url, scene_num, folder, used=None):
     """(d) YouTube Multi-Frame Extraction (No API Key): distinct frame thumbnails per scene (maxresdefault, hq1, hq2, hq3)."""
     used = used or set()
@@ -398,80 +474,30 @@ def extract_youtube_thumbnail(yt_url, scene_num, folder, used=None):
     return None
 
 
-def generate_documentary_card(draft, scene, folder):
-    """Generate a clean, styled 1080x1920 (9:16) documentary visual card."""
-    width, height = 1080, 1920
-    img = Image.new('RGB', (width, height), '#0e121c')
-    draw = ImageDraw.Draw(img)
-
-    # Outer elegant frame/border
-    draw.rectangle([32, 32, width - 32, height - 32], outline='#1c2333', width=2)
-    draw.rectangle([36, 36, width - 36, height - 36], outline='#141924', width=1)
-
-    def _font(size, bold=False):
-        for name in (["arialbd.ttf", "DejaVuSans-Bold.ttf"] if bold else ["arial.ttf", "DejaVuSans.ttf"]):
-            try:
-                return ImageFont.truetype(name, size)
-            except OSError:
-                pass
-        return ImageFont.load_default(size=size)
-
-    # Top badge
-    badge_label = "DOCUMENTARY ARCHIVE"
-    draw.rounded_rectangle([70, 90, 420, 146], radius=8, fill='#162033', outline='#2b3c5a', width=2)
-    draw.text((95, 106), badge_label, font=_font(22, True), fill='#7aa2d6')
-
-    # Topic heading
-    draft_title = getattr(draft, 'title', '')
-    if draft_title:
-        wrapped_title = textwrap.fill(draft_title, width=38)
-        draw.text((70, 200), wrapped_title, font=_font(34, True), fill='#8e9bb0')
-        draw.line([70, 340, width - 70, 340], fill='#253248', width=2)
-
-    # Center: On-screen text or headline / quote
-    center_text = scene.get('on_screen_text') or scene.get('visual_description') or ''
-    if not center_text or len(center_text) < 5:
-        center_text = scene.get('narration', '').split('.')[0]
-
-    container_top = 500
-    container_bottom = 1380
-    draw.rounded_rectangle([60, container_top, width - 60, container_bottom], radius=16, fill='#131825', outline='#26344d', width=2)
-    draw.line([90, container_top + 40, 90, container_bottom - 40], fill='#3b82f6', width=6)
-
-    draw.text((120, container_top + 30), "“", font=_font(72, True), fill='#4b638b')
-    wrapped_quote = textwrap.fill(center_text, width=24)
-    draw.text((120, container_top + 105), wrapped_quote, font=_font(52, True), fill='#f1f5f9', spacing=14)
-
-    context_text = scene.get('visual_description', '')
-    if context_text and context_text != center_text:
-        wrapped_ctx = textwrap.fill(context_text, width=44)
-        draw.text((120, container_bottom - 180), wrapped_ctx, font=_font(26), fill='#94a3b8')
-
-    scene_num = scene.get('number', 1)
-    footer_text = f"SCENE {scene_num} • VERIFIED DOCUMENTARY EVIDENCE"
-    draw.text((70, height - 120), footer_text, font=_font(22), fill='#54647e')
-
-    card_id = uuid4().hex[:12]
-    out_path = folder / f'card_{scene_num}_{card_id}.jpg'
-    img.save(out_path, 'JPEG', quality=95)
-    img.save(folder / f'card_{scene_num}_{card_id}-source.jpg', 'JPEG', quality=95)
-
-    return {
-        'path': str(out_path),
-        'hash': hashlib.sha256(out_path.read_bytes()).hexdigest(),
-        'source_url': '',
-        'creator': 'Documentary Visual Generator',
-        'license': 'Documentary Visual Card',
-        'license_url': '',
-        'credit': f'Documentary scene card: {center_text[:100]}',
-        'kind': 'documentary_card',
-        'note': 'Styled documentary visual card generated for scene context.'
-    }
-
-
 def collect_one(draft,scene,existing):
-    """Zero-key free online visual sourcing in exact priority order before offline card fallback."""
+    """Authentic visual sourcing: (1) Connected Local Celebrity Folder, (2) Local Library, (3) Real Web Photos Fallback."""
     data=json.loads(draft.data)
+    folder=directory(draft)/'assets';folder.mkdir(exist_ok=True)
+    used={a.get('hash') for a in existing if a}
+    failures=[]
+
+    # Priority 1: Connected Local Celebrity Asset Folder (images + short video clips)
+    try:
+        from app.services.celebrity_vault import match_celebrity_asset
+        with SessionLocal() as db:
+            vault_asset = match_celebrity_asset(
+                db, draft.workspace_id, scene, folder,
+                draft_title=draft.title,
+                people=(data.get('analysis') or {}).get('people', []),
+                existing=existing,
+                preference=data.get('media_preference'),
+            )
+        if vault_asset and vault_asset['hash'] not in used:
+            return vault_asset
+    except Exception as exc:
+        failures.append(type(exc).__name__)
+
+    # Priority 2: Local Media Library (manual/approved collection)
     if data.get('media_mode') in {'local','mixed'}:
         from app.services.title_library import match_local
         selected=match_local(draft,scene,existing)
@@ -480,11 +506,8 @@ def collect_one(draft,scene,existing):
             raise ValueError('Suitable local media missing for scene '+str(scene['number'])+'. Select a confirmed image or explicitly enable Mixed online fallback.')
     cached=cached_subject_photo(draft,scene,existing)
     if cached:return cached
-    used={a.get('hash') for a in existing if a}
-    folder=directory(draft)/'assets';folder.mkdir(exist_ok=True)
-    failures=[]
 
-    # (a) Openverse Free Image Search (No API Key)
+    # Priority 3: Real Web Photos Fallback (Openverse -> DuckDuckGo Real Photos -> Wikimedia Commons -> YouTube frame)
     try:
         ov_asset = fetch_openverse_visual(scene, folder, used)
         if ov_asset and ov_asset['hash'] not in used:
@@ -492,23 +515,14 @@ def collect_one(draft,scene,existing):
     except Exception as exc:
         failures.append(type(exc).__name__)
 
-    # (b) Lexica Free Image Search (No API Key)
     try:
-        lx_asset = fetch_lexica_visual(scene, folder, used)
-        if lx_asset and lx_asset['hash'] not in used:
-            return lx_asset
+        from app.services.celebrity_vault import search_web_real_photo
+        ddg_asset = search_web_real_photo(scene, folder, used)
+        if ddg_asset and ddg_asset['hash'] not in used:
+            return ddg_asset
     except Exception as exc:
         failures.append(type(exc).__name__)
 
-    # (c) Pollinations Free 9:16 AI Visual Generator (No API Key)
-    try:
-        pl_asset = fetch_pollinations_visual(scene, folder, used)
-        if pl_asset and pl_asset['hash'] not in used:
-            return pl_asset
-    except Exception as exc:
-        failures.append(type(exc).__name__)
-
-    # Also check Wikimedia Commons (zero-key public archive) if available
     for provider in [CommonsAssetProvider()]:
         try:items=provider.search(scene['image_query'])
         except Exception as exc:failures.append(type(exc).__name__);continue
@@ -525,11 +539,10 @@ def collect_one(draft,scene,existing):
                 digest=hashlib.sha256(path.read_bytes()).hexdigest()
                 if digest in used:continue
                 return {'path':str(path),'hash':digest,'source_url':item['url'],'creator':item['creator'],'license':item['license'],
-                    'license_url':item['license_url'],'credit':asset.provenance['required_credit'],'kind':'licensed_photo',
+                    'license_url':item['license_url'],'credit':asset.provenance['required_credit'],'kind':'licensed_photo','media_type':'image',
                     'provider':item['source'],'note':'Illustrative licensed photograph; not proof of the narrated event.'}
             except Exception as exc:failures.append(type(exc).__name__)
 
-    # (d) YouTube Multi-Frame Extraction (No API Key)
     for u in data.get('source_urls', []):
         if 'youtu' in u:
             try:
@@ -539,16 +552,7 @@ def collect_one(draft,scene,existing):
             except Exception as exc:
                 failures.append(type(exc).__name__)
 
-    # Final Offline Fallback: generate_documentary_card ONLY when all internet requests fail
-    try:
-        card = generate_documentary_card(draft, scene, folder)
-        if card and card['hash'] not in used:
-            card['provider'] = 'documentary_card'
-            return card
-    except Exception as exc:
-        failures.append(type(exc).__name__)
-
-    raise ValueError('No relevant permitted photo found for scene '+str(scene['number'])+'. Retry this scene with a more specific image query. AI image generation is not configured; no placeholder or invented footage was used. '+', '.join(sorted(set(failures))))
+    raise ValueError('No relevant real photo or local celebrity clip found for scene '+str(scene['number'])+'. Connect a local celebrity folder or upload a custom image/clip. '+', '.join(sorted(set(failures))))
 
 
 def work(draft_id,operation='prepare',scene_number=None,instruction=''):
@@ -564,27 +568,38 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
         try:
             if operation in {'prepare','research','audit'}:
                 import copy
+                from app.ai.smart_router import QuotaExhaustedError
                 saved_plan=copy.deepcopy(data.get('plan')) if operation in {'research','audit'} else None
                 previous_sources=copy.deepcopy(data.get('sources',[]))
+                previous_analysis=copy.deepcopy(data.get('analysis'))
                 data.setdefault('research_history',[]).append({'revision':draft.revision-1,'started_revision':draft.revision,'sources':previous_sources,'plan':copy.deepcopy(data.get('plan')),'scope':copy.deepcopy(data.get('scope')),'evidence_review':copy.deepcopy(data.get('evidence_review')),'assets':copy.deepcopy(data.get('assets',[]))})
                 data.pop('research_failure_code',None)
+                data.pop('ai_fallback_mode',None)
                 data['research_state']='in_progress'
                 data.pop('evidence_review',None)
                 if operation!='audit':
-                    data.pop('analysis',None)
-                    save(db,draft,data,'analyzing')
-                    prompt=('Analyze this title for ONE focused short angle. Identify topic, viewer intent, angle, rationale and 1–3 precise web search queries. '
-                        'HARD LIMIT: the duration is in SECONDS, never minutes. A complete history, timeline, evolution, overview or list of milestones is forbidden. '
-                        'Choose one specific question, single event, origin of one term, surprising documented fact, or brief story beat. '
-                        'Treat the title as an unverified lead: never adopt its emotional verbs or quotes as facts. Include people explicitly named in the title and alleged_claims, not confirmed claims. Search neutral names, original interviews/podcasts and credible reporting. Do not manufacture a date. '+json.dumps({'title':draft.title,'duration_seconds':draft.duration,'style':draft.style}))
-                    for attempt in range(2):
-                        proposed=ai(prompt,Analysis)
-                        try:
-                            data['analysis']=validate_angle(proposed);break
-                        except ValueError:
-                            data.setdefault('rejected_angles',[]).append(proposed['angle'])
-                            if attempt:raise
-                            prompt+=' REPAIR: Your previous angle was too broad or longer than a short. Choose ONE concrete question, not an overview. Rejected angle: '+proposed['angle']
+                    if operation=='research' and isinstance(previous_analysis,dict) and previous_analysis.get('angle'):
+                        data['analysis']=previous_analysis
+                    else:
+                        data.pop('analysis',None)
+                        save(db,draft,data,'analyzing')
+                        prompt=('Analyze this title for ONE focused short angle. Identify topic, viewer intent, angle, rationale and 1–3 precise web search queries. '
+                            'HARD LIMIT: the duration is in SECONDS, never minutes. A complete history, timeline, evolution, overview or list of milestones is forbidden. '
+                            'Choose one specific question, single event, origin of one term, surprising documented fact, or brief story beat. '
+                            'Treat the title as an unverified lead: never adopt its emotional verbs or quotes as facts. Include people explicitly named in the title and alleged_claims, not confirmed claims. Search neutral names, original interviews/podcasts and credible reporting. Do not manufacture a date. '+json.dumps({'title':draft.title,'duration_seconds':draft.duration,'style':draft.style}))
+                        for attempt in range(2):
+                            try:
+                                proposed=ai(prompt,Analysis)
+                            except QuotaExhaustedError:
+                                data['analysis']=_local_analysis_from_title(draft.title,draft.duration,draft.style)
+                                data['ai_fallback_mode']='local_analysis_quota_fallback'
+                                break
+                            try:
+                                data['analysis']=validate_angle(proposed);break
+                            except ValueError:
+                                data.setdefault('rejected_angles',[]).append(proposed['angle'])
+                                if attempt:raise
+                                prompt+=' REPAIR: Your previous angle was too broad or longer than a short. Choose ONE concrete question, not an overview. Rejected angle: '+proposed['angle']
                     from app.services.title_research import lead_from_title
                     data['lead']=lead_from_title(draft.title,data['analysis'])
                     save(db,draft,data,'researching')
@@ -595,11 +610,21 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
                     data['sources']=research(data['analysis'],data.get('source_urls',[]),data['research_diagnostics'],data['lead'],progress,draft.style)
                 save(db,draft,data,'research_verification')
                 from app.services.title_evidence import verify_incident
-                data['evidence_review']=verify_incident(draft,data,ai)
+                try:
+                    data['evidence_review']=verify_incident(draft,data,ai)
+                except QuotaExhaustedError:
+                    extractive_review=_extractive_verify_incident(draft,data)
+                    if not extractive_review:
+                        raise
+                    data['evidence_review']=extractive_review
+                    data['ai_fallback_mode']='source_extractive_quota_fallback'
                 data['research_state']='verified'
                 from app.services.title_scope import propose
                 data.pop('scope',None)
-                scope=propose(draft,data,ai)
+                try:
+                    scope=propose(draft,data,ai)
+                except QuotaExhaustedError:
+                    scope=None
                 if scope:data['scope']=scope
                 save(db,draft,data,'script')
                 if saved_plan:
@@ -607,22 +632,45 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
                     for claim in saved_plan['claims']:
                         url=old_urls.get(claim['source_id'])
                         if url in new_ids:claim['source_id']=new_ids[url]
-                    data['plan']=check_plan(draft,saved_plan,data['sources']);data['review_required']=True
+                    try:
+                        data['plan']=check_plan(draft,saved_plan,data['sources'],verify=(operation=='audit'))
+                    except QuotaExhaustedError:
+                        if operation=='audit':raise
+                        data['plan']=check_plan(draft,saved_plan,data['sources'],verify=False)
+                    data['review_required']=True
                     data.pop('video',None);save(db,draft,data,'script_review');return
                 context={'title':data.get('scope',{}).get('proposed_title',draft.title),'focus':data.get('scope',{}).get('focus'),'analysis':data['analysis'],'sources':data['sources'],'evidence_review':data.get('evidence_review'),'scope':data.get('scope')}
                 if scope:
                     context={'title':scope['proposed_title'],'focus':scope['focus'],'verified_claims':scope['claims'],'omissions':scope['omissions'],'publication_dates':{s['id']:s.get('published_at') for s in data['sources']}}
                 prompt=instructions(draft)+' For partial verification, draft creation is authorized before user scope acceptance; acceptance applies only to rendering. Describe the historical incident as historical, not recent or breaking news. If scope is present, use only its verified claims, no quotation marks or direct spoken quotations and none of its omissions. The original sensational title is not the output title. HARD total narration word limit: '+str(round(draft.duration*1.15))+' to '+str(round(draft.duration*2.5))+'. Aim below the maximum. '+json.dumps(context)
                 for attempt in range(2):
-                    plan=ai(prompt,Plan)
+                    try:
+                        plan=ai(prompt,Plan)
+                    except QuotaExhaustedError:
+                        fallback_plan=_extractive_grounded_plan(draft,data)
+                        if not fallback_plan:
+                            raise
+                        plan=check_plan(draft,fallback_plan,data['sources'],verify=False)
+                        data['ai_fallback_mode']='source_extractive_quota_fallback'
+                        break
                     if scope:
                         plan['claims']=[{'claim':c['claim'],'source_id':e['source_id'],'supporting_excerpt':e['excerpt'][:600]} for c in scope['claims'] for e in c['evidence']]
                     try:
-                        plan=check_plan(draft,plan,data['sources']);break
+                        # Scope claims & passages were already audited by verify_incident; avoid burning an extra LLM call unless un-scoped
+                        plan=check_plan(draft,plan,data['sources'],verify=not bool(scope));break
+                    except QuotaExhaustedError:
+                        plan=check_plan(draft,plan,data['sources'],verify=False)
+                        data['ai_fallback_mode']='source_extractive_quota_fallback'
+                        break
                     except ValueError as exc:
                         data.setdefault('rejected_plans',[]).append({'revision':draft.revision,'reason':str(exc),'plan':plan})
                         if attempt:raise
                         prompt+=' REPAIR: '+str(exc)+'. Return a complete concise plan within the hard word limit, with paraphrased narration and no quotation marks. Previous candidate: '+json.dumps(plan)
+                default_transitions=['smoothleft','flash','wipe','zoomin','slide']
+                raw_trans=[sc.get('transition','dissolve') for sc in plan['scenes'][1:]]
+                if raw_trans and (all(t in {'cut','dissolve'} for t in raw_trans) or len(set(raw_trans))==1):
+                    for idx_t in range(1,len(plan['scenes'])):
+                        plan['scenes'][idx_t]['transition']=default_transitions[(idx_t-1)%len(default_transitions)]
                 data['plan']=plan;data['assets']=[None]*len(plan['scenes']);data['review_required']=True
                 save(db,draft,data,'script_review');return
             if operation=='rewrite':
@@ -644,10 +692,24 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
                 replacement=collect_one(draft,proposal,[a for i,a in enumerate(data.get('assets',[])) if i!=index])
                 data['plan']['scenes'][index]=proposal;data['assets'][index]=replacement;data.pop('video',None)
                 save(db,draft,data,'script_review');return
+            if operation=='visuals':
+                if not data.get('plan'):raise ValueError('Wait for researched script generation before collecting visuals.')
+                scenes=data['plan']['scenes']
+                assets=data.get('assets') or [None]*len(scenes)
+                if len(assets)<len(scenes):assets.extend([None]*(len(scenes)-len(assets)))
+                data['assets']=assets
+                save(db,draft,data,'visuals')
+                for i,scene in enumerate(scenes):
+                    if not data['assets'][i]:
+                        data['assets'][i]=collect_one(draft,scene,data['assets'])
+                        save(db,draft,data)
+                save(db,draft,data,'script_review');return
             from app.services.title_scope import accepted
             if not accepted(data):raise ValueError('Accept the current revised scope and script before rendering.')
             if data.get('research_state') in {'failed','in_progress'}:raise ValueError('Latest research is not verified. Retry research before rendering.')
+            data['render_stage']='Validating reviewed script and source checks'
             save(db,draft,data,'validating');data['plan']=check_plan(draft,data['plan'],data['sources'],verify=False)
+            data['render_stage']='Verifying scene media assets'
             save(db,draft,data,'visuals')
             for i,scene in enumerate(data['plan']['scenes']):
                 existing=data['assets'][i]
@@ -656,29 +718,79 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
                     media=asset_access(db,existing['library_media_id'],member)
                     if media.archived or not media.approved:raise ValueError('A selected image is no longer approved. Replace it in scene review.')
                 if not data['assets'][i]:data['assets'][i]=collect_one(draft,scene,data['assets']);save(db,draft,data)
-            save(db,draft,data,'voiceover')
             full=' '.join(s['narration'] for s in data['plan']['scenes'])
             # Explicit local-only boundary. Cloud voices require separate configuration/choice.
-            provider,voice=narrator_choice(draft.language,data.get('narrator','automatic'))
+            provider,voice=narrator_choice(draft.language,data.get('narrator','automatic'),data.get('preferred_voice',''))
+            voice_style=data.get('voice_style') or settings.title_short_voice_style
+            voice_pace=data.get('voice_pace') or settings.title_short_voice_pace
+            voice_accent=data.get('voice_accent') or settings.title_short_voice_accent
+            caption_style=data.get('caption_style') or 'viral_gold'
+            data['render_stage']=f'Synthesizing voiceover ({provider}: {voice})'
+            save(db,draft,data,'voiceover')
             run_root=directory(draft)/('render-'+str(draft.revision));run_root.mkdir(parents=True,exist_ok=True)
             audio=run_root/'source.wav';metadata={}
-            generate_narration(full,voice,audio,provider=provider,language=LANGUAGES[draft.language],metadata=metadata)
-            validate_narration(audio)
-            if audio_duration(audio)<draft.duration*.7:
+            reused=False
+            import shutil as _shutil
+            # Reuse already synthesized, verified PCM + native timing when exact script, provider, and voice controls match a previous render.
+            for prev_dir in sorted(directory(draft).glob('render-*'),reverse=True):
+                if prev_dir==run_root:continue
+                prev_wav=prev_dir/'source.wav'
+                prev_meta=prev_dir/'source.generation.json'
+                if not prev_wav.is_file():continue
+                try:
+                    if prev_meta.is_file():
+                        gm=json.loads(prev_meta.read_text(encoding='utf8'))
+                        ctrl=gm.get('engine_controls') or {}
+                        prev_voice=ctrl.get('voice') or gm.get('voice')
+                        if prev_voice and prev_voice!=voice:continue
+                        if provider=='kokoro_onnx' and gm.get('provider')!='kokoro-onnx':continue
+                        if provider!='kokoro_onnx' and gm.get('provider')=='kokoro-onnx':continue
+                        if provider=='gemini_tts':
+                            if gm.get('provider')!='gemini_tts':continue
+                            if (ctrl.get('style'),ctrl.get('pace'),ctrl.get('accent'))!=(voice_style,voice_pace,voice_accent):continue
+                        elif gm.get('provider')=='gemini_tts':
+                            continue
+                    elif prev_wav.with_suffix('.words.json').is_file():
+                        if provider=='gemini_tts':continue
+                        wt=json.loads(prev_wav.with_suffix('.words.json').read_text(encoding='utf8'))
+                        if provider=='kokoro_onnx' and 'Kokoro' not in (wt.get('provider') or ''):continue
+                        if provider!='kokoro_onnx' and 'Kokoro' in (wt.get('provider') or ''):continue
+                    validate_narration(prev_wav)
+                    if not load_boundaries(prev_wav,full):continue
+                    for ext in ('.wav','.words.json','.generation.json','.phonemes.json'):
+                        src_f=prev_wav.with_suffix(ext)
+                        if src_f.is_file():_shutil.copy2(src_f,audio.with_suffix(ext))
+                    if prev_meta.is_file():
+                        gm=json.loads(prev_meta.read_text(encoding='utf8'))
+                        metadata.update(provider=provider,voice=voice,locale='en-GB' if voice.startswith('b') else LANGUAGES[draft.language],reason='Reused verified identical narration',cached=True)
+                        if provider=='gemini_tts':
+                            metadata.update(voice_style=voice_style,voice_pace=voice_pace,voice_accent=voice_accent)
+                    reused=True
+                    break
+                except Exception:
+                    continue
+            if not reused:
+                generate_narration(
+                    full,voice,audio,provider=provider,language=LANGUAGES[draft.language],metadata=metadata,
+                    voice_style=voice_style,voice_pace=voice_pace,voice_accent=voice_accent,
+                )
+                validate_narration(audio)
+            if audio_duration(audio)<draft.duration*.5:
                 raise ValueError('Narration is too short for the selected duration. Expand the focused explanation and retry; no filler or artificial slow-down was added.')
             if audio_duration(audio)>draft.duration-.7:
                 raise ValueError('Narration exceeds '+str(draft.duration)+' seconds. Shorten the reviewed script and retry; speech was not cut off or sped up.')
             if not load_boundaries(audio,full):
                 raise ValueError('This narrator did not provide script-bound native timing. Configure a compatible narrator; estimated captions are not marked synchronized.')
             data['voice']={**metadata,'provider':provider,'caption_timing':'native synthesis boundaries','roman_urdu_note':'Roman Urdu text is passed to the compatible Urdu narrator; pronunciation needs review.' if draft.language=='Roman Urdu' else ''}
+            data['render_stage']='Compositing 9:16 scenes, motion & captions (FFmpeg)'
             save(db,draft,data,'rendering')
-            plan=[{'visual_type':'archival_photo','text':s['narration'],'purpose':s['visual_description'],'motion':{'type':s['motion'],'amount':.06},'transition_in':s['transition']} for s in data['plan']['scenes']]
+            plan=[{'visual_type':'licensed_clip' if (a.get('media_type')=='video' or Path(a['path']).suffix.lower() in {'.mp4','.mov','.webm'}) else 'archival_photo','text':s['narration'],'purpose':s['visual_description'],'motion':{'type':s['motion'],'amount':.06},'transition_in':s.get('transition','smoothleft')} for s,a in zip(data['plan']['scenes'],data['assets'])]
             out=render_video(draft.id,data.get('scope',{}).get('proposed_title',draft.title),data['analysis']['topic'],full,audio,draft.duration,run_root,
-                [Path(a['path']) for a in data['assets']],scene_plan=plan,slide_kinds=['photo']*len(plan),
-                subtitle_preset={'language':LANGUAGES[draft.language]},revision=draft.revision)
+                [Path(a['path']) for a in data['assets']],scene_plan=plan,slide_kinds=['clip' if p['visual_type']=='licensed_clip' else 'photo' for p in plan],
+                subtitle_preset={'language':LANGUAGES[draft.language],'caption_style':caption_style},revision=draft.revision)
             # Normalize the existing renderer result.
             video=Path(out['video_path'] if isinstance(out,dict) else out[0])
-            decode=subprocess.run([settings.ffmpeg_path,'-v','error','-i',str(video),'-f','null','-'],capture_output=True,text=True,timeout=180)
+            decode=subprocess.run([settings.ffmpeg_path,'-v','error','-threads','0','-i',str(video),'-f','null','-'],capture_output=True,text=True,timeout=180)
             if decode.returncode:raise ValueError('Rendered file failed complete decoding. Retry render; no completed video recorded.')
             timeline=json.loads((video.parent/'render-timeline.json').read_text())
             for scene,beat in zip(data['plan']['scenes'],timeline['scenes']):
@@ -688,6 +800,7 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
             data.setdefault('renders',[]).append(dict(data['video']))
             (video.parent/'credits.txt').write_text('\n\n'.join(a['credit'] for a in data['assets']),encoding='utf8')
             (video.parent/'research-sources.json').write_text(json.dumps(data['sources'],ensure_ascii=False,indent=2),encoding='utf8')
+            data['review_status']='pending_review'
             save(db,draft,data,'ready')
         except Exception as exc:
             from app.services.title_research import ResearchFailure

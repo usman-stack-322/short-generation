@@ -22,6 +22,7 @@ def media_session(response: Response, context=Depends(current_context)):
     response.set_cookie('media_session', create_token(context[0].id), httponly=True, samesite='lax', path='/generated', max_age=86400)
     response.set_cookie('media_session', create_token(context[0].id), httponly=True, samesite='lax', path='/api/library/media', max_age=86400)
     response.set_cookie('media_session', create_token(context[0].id), httponly=True, samesite='lax', path='/api/title-shorts', max_age=86400)
+    response.set_cookie('media_session', create_token(context[0].id), httponly=True, samesite='lax', path='/api/assets/vault', max_age=86400)
     return {'configured': True}
 
 

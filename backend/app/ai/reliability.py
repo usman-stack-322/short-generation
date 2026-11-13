@@ -41,11 +41,19 @@ class GeminiRetryPolicy:
                 if attempt < 2:
                     time.sleep((2, 5)[attempt] + random.uniform(0, .25))
                     continue
-                fallback = settings.gemini_fallback_model.strip()
-                if fallback and fallback != selected_model:
-                    # No guessed model or model substitution: the API validates this explicit choice.
-                    return self._fallback(request, prompt, fallback)
-                raise
+                fallbacks = []
+                for cand in (settings.gemini_fallback_model.strip(), settings.gemini_model.strip()):
+                    if cand and cand != selected_model and cand not in fallbacks:
+                        fallbacks.append(cand)
+                last_exc = exc
+                for fb in fallbacks:
+                    try:
+                        return self._fallback(request, prompt, fb)
+                    except GeminiGenerationError as fb_exc:
+                        last_exc = fb_exc
+                        if not fb_exc.retryable:
+                            raise
+                raise last_exc
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 malformed += 1
                 logger.warning('Gemini malformed structured output model=%s attempt=%s detail=%r',
@@ -56,11 +64,16 @@ class GeminiRetryPolicy:
         raise AssertionError('Gemini retry bound exceeded')
 
     def _fallback(self, request, prompt, model):
-        try:
-            return self._attempt(request, prompt, model, True)
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            logger.warning('Gemini fallback malformed output model=%s detail=%r', model, safe_detail(exc))
-            raise GeminiGenerationError('Gemini returned invalid structured output. Please retry generation.', retryable=True) from None
+        for fb_attempt in range(2):
+            try:
+                return self._attempt(request, prompt, model, True)
+            except GeminiGenerationError as exc:
+                if not exc.retryable or fb_attempt:
+                    raise
+                time.sleep(2 + random.uniform(0, .25))
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                logger.warning('Gemini fallback malformed output model=%s detail=%r', model, safe_detail(exc))
+                raise GeminiGenerationError('Gemini returned invalid structured output. Please retry generation.', retryable=True) from None
 
     def _attempt(self, request, prompt, model, fallback):
         self.attempts += 1

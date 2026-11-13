@@ -17,7 +17,7 @@ router=APIRouter(prefix='/api/title-shorts',tags=['Title to AI Short'])
 
 def access(db,id,membership):
     row=db.get(TitleShortDraft,id)
-    if not row or row.workspace_id!=membership.workspace_id or row.creator_id!=membership.user_id:
+    if not row or row.workspace_id!=membership.workspace_id or (membership.role not in {'OWNER','ADMIN'} and row.creator_id!=membership.user_id):
         raise HTTPException(404,'Title short not found')
     return row
 
@@ -34,16 +34,22 @@ def public(row):
     video=data.get('video')
     return {'id':row.id,'title':row.title,'duration':row.duration,'language':row.language,'style':row.style,
         'status':row.status,'revision':row.revision,'error_message':row.error_message,'failed_step':data.get('failed_step'),
-        'source_urls':data.get('source_urls',[]),'narrator':data.get('narrator','automatic'),'research_diagnostics':data.get('research_diagnostics',[]),
+        'source_urls':data.get('source_urls',[]),'narrator':data.get('narrator','automatic'),'preferred_voice':data.get('preferred_voice',''),
+        'voice_style':data.get('voice_style','Newscaster'),'voice_pace':data.get('voice_pace','Rapid'),
+        'voice_accent':data.get('voice_accent','American English'),'caption_style':data.get('caption_style','viral_gold'),
+        'research_diagnostics':data.get('research_diagnostics',[]),
         'research_state':data.get('research_state'),'research_failure_code':data.get('research_failure_code'),'research_candidates':data.get('research_candidates',[]),'primary_media':data.get('primary_media',[]),'evidence_review':data.get('evidence_review'),'lead':data.get('lead'),
         'scope':data.get('scope'),'scope_accepted':accepted(data),'analysis':data.get('analysis'),'sources':data.get('sources',[]),'claims':(plan or {}).get('claims',[]),
         'scene_timing':data.get('scene_timing','estimated until final narration'),
+        'ai_fallback_mode':data.get('ai_fallback_mode'),
         'scenes':scenes,'script':' '.join(s['narration'] for s in scenes),'voice':data.get('voice'),
         'video_url':base+'video?revision='+str(video['revision']) if video else None,
         'credits_url':base+'credits?revision='+str(video['revision']) if video else None,
         'sources_url':base+'sources?revision='+str(video['revision']) if video else None,
         'output_duration':video.get('duration') if video else None,'render_history':[{'revision':v['revision'],'duration':v['duration'],'video_url':base+'video?revision='+str(v['revision'])} for v in data.get('renders',[])],
-        'media_mode':data.get('media_mode','online'),'collection_id':data.get('collection_id'),
+        'media_mode':data.get('media_mode','online'),'media_preference':data.get('media_preference','mix_both'),'collection_id':data.get('collection_id'),
+        'review_status':data.get('review_status') or ('pending_review' if row.status=='ready' else 'rendering' if row.status in {'validating','visuals','voiceover','rendering'} else 'draft'),
+        'review_note':data.get('review_note',''),'youtube_video_id':data.get('youtube_video_id'),'youtube_url':data.get('youtube_url'),'creator_id':row.creator_id,
         'online_fallback':data.get('online_fallback',False),'channel_id':data.get('channel_id'),
         'video_job_id':data.get('video_job_id'),'scene_locks':data.get('scene_locks',[]),
         'uploads_enabled':settings.youtube_uploads_enabled,'created_at':row.created_at.isoformat()}
@@ -59,7 +65,8 @@ def claim(db,row,revision,status):
 @router.get('')
 def listing(context=Depends(current_context),db:Session=Depends(get_db)):
     q=db.query(TitleShortDraft).filter_by(workspace_id=context[1].workspace_id)
-    q=q.filter_by(creator_id=context[0].id)
+    if context[1].role not in {'OWNER','ADMIN'}:
+        q=q.filter_by(creator_id=context[0].id)
     return [public(row) for row in q.order_by(TitleShortDraft.created_at.desc()).limit(50)]
 
 
@@ -83,10 +90,11 @@ def create(payload:TitleInput,background:BackgroundTasks,context=Depends(require
     previous=existing()
     if previous:return previous
     # Missing configuration is actionable before allocating a worker.
-    if not settings.gemini_api_key.strip():raise HTTPException(503,'Configure GEMINI_API_KEY and GEMINI_MODEL on the server. Title analysis/researched scripts require the AI service; development fallback is disabled.')
-    check=preflight(payload.language,payload.narrator)
+    from app.ai.smart_router import has_any_ai_configured
+    if not has_any_ai_configured():raise HTTPException(503,'Configure GEMINI_API_KEY (or Groq / Ollama) and GEMINI_MODEL on the server. Title analysis/researched scripts require an AI provider; development fallback is disabled.')
+    check=preflight(payload.language,payload.narrator,payload.voice)
     if not check['available']:raise HTTPException(422,check['message'])
-    row=TitleShortDraft(id=key,workspace_id=context[1].workspace_id,creator_id=context[0].id,**payload.model_dump(include={'title','duration','language','style'}),status='analyzing',data=json.dumps({**payload.model_dump(include={'source_urls','narrator','media_mode','collection_id','online_fallback','channel_id'}),'request_fingerprint':fingerprint}))
+    row=TitleShortDraft(id=key,workspace_id=context[1].workspace_id,creator_id=context[0].id,**payload.model_dump(include={'title','duration','language','style'}),status='analyzing',data=json.dumps({**payload.model_dump(include={'source_urls','narrator','voice_style','voice_pace','voice_accent','caption_style','media_mode','media_preference','collection_id','online_fallback','channel_id'}),'preferred_voice':payload.voice,'request_fingerprint':fingerprint}))
     db.add(row)
     try:db.commit()
     except IntegrityError:
@@ -100,13 +108,68 @@ def create(payload:TitleInput,background:BackgroundTasks,context=Depends(require
 
 @router.get('/capabilities')
 def capabilities(context=Depends(current_context)):
-    return {'languages':{lang:preflight(lang) for lang in ['English','Urdu','Roman Urdu']},'local_english':preflight('English','local')}
+    from app.tts.capabilities import (
+        GEMINI_ACCENT_OPTIONS,
+        GEMINI_PACE_OPTIONS,
+        GEMINI_STYLE_OPTIONS,
+        list_voice_options,
+    )
+    return {
+        'languages':{lang:preflight(lang) for lang in ['English','Urdu','Roman Urdu']},
+        'local_english':preflight('English','local'),
+        'voices':list_voice_options(),
+        'studio_controls':{
+            'styles':GEMINI_STYLE_OPTIONS,
+            'paces':GEMINI_PACE_OPTIONS,
+            'accents':GEMINI_ACCENT_OPTIONS,
+            'caption_styles':[
+                {'id':'viral_gold','label':'Viral Gold Pop (Bold Highlight)'},
+                {'id':'cyan_pop','label':'Electric Cyan Pop'},
+                {'id':'clean_broadcast','label':'Newscaster Broadcast'},
+                {'id':'classic','label':'Classic Minimal'},
+            ],
+        },
+    }
+
+
+class NarratorInput(ActionInput):
+    narrator:str='automatic'
+    voice:str=''
+    voice_style:str|None=None
+    voice_pace:str|None=None
+    voice_accent:str|None=None
+    caption_style:str|None=None
+
+
+@router.put('/{id}/narrator')
+def set_narrator(id:str,payload:NarratorInput,context=Depends(require_editor),db:Session=Depends(get_db)):
+    row=access(db,id,context[1]);data=json.loads(row.data)
+    check=preflight(row.language,payload.narrator,payload.voice)
+    if not check['available']:raise HTTPException(422,check['message'])
+    if payload.caption_style is not None and payload.caption_style not in {'viral_gold','cyan_pop','clean_broadcast','classic'}:
+        raise HTTPException(422,'Unsupported caption style')
+    voice_changed=(
+        payload.narrator!=data.get('narrator','automatic')
+        or payload.voice!=data.get('preferred_voice','')
+        or (payload.voice_style is not None and payload.voice_style!=data.get('voice_style'))
+        or (payload.voice_pace is not None and payload.voice_pace!=data.get('voice_pace'))
+        or (payload.voice_accent is not None and payload.voice_accent!=data.get('voice_accent'))
+    )
+    claim(db,row,payload.revision,'script_review' if data.get('plan') else row.status)
+    data['narrator']=payload.narrator;data['preferred_voice']=payload.voice
+    if payload.voice_style is not None:data['voice_style']=payload.voice_style
+    if payload.voice_pace is not None:data['voice_pace']=payload.voice_pace
+    if payload.voice_accent is not None:data['voice_accent']=payload.voice_accent
+    if payload.caption_style is not None:data['caption_style']=payload.caption_style
+    data.pop('video',None)
+    if voice_changed:data.pop('voice',None)
+    row.data=json.dumps(data,ensure_ascii=False);db.commit();return public(row)
 
 
 @router.post('/{id}/sources',status_code=202)
 def set_sources(id:str,payload:SourcesInput,background:BackgroundTasks,context=Depends(require_editor),db:Session=Depends(get_db)):
     row=access(db,id,context[1]);data=json.loads(row.data)
-    check=preflight(row.language,data.get('narrator','automatic'))
+    check=preflight(row.language,data.get('narrator','automatic'),data.get('preferred_voice',''))
     if not check['available']:raise HTTPException(422,check['message'])
     claim(db,row,payload.revision,'analyzing')
     data['source_urls']=payload.source_urls
@@ -162,7 +225,7 @@ def render(id:str,payload:ActionInput,background:BackgroundTasks,context=Depends
     if not accepted(data):raise HTTPException(409,'Accept the current revised scope and script before rendering.')
     if data.get('research_state') in {'failed','in_progress'}:raise HTTPException(409,'Latest research is not verified. Retry research before rendering.')
     if not data.get('plan') or not data.get('sources'):raise HTTPException(409,'A researched script must be reviewed before rendering.')
-    check=preflight(row.language,data.get('narrator','automatic'))
+    check=preflight(row.language,data.get('narrator','automatic'),data.get('preferred_voice',''))
     if not check['available']:raise HTTPException(422,check['message'])
     claim(db,row,payload.revision,'validating')
     data.pop('video',None);data.pop('voice',None);data.pop('scene_timing',None)
@@ -192,6 +255,28 @@ def rewrite(id:str,number:int,payload:SceneInput,background:BackgroundTasks,cont
     if not data.get('plan') or not 1<=number<=len(data['plan']['scenes']):raise HTTPException(404,'Scene not found')
     if number in data.get('scene_locks',[]):raise HTTPException(409,'Unlock this scene before regenerating')
     claim(db,row,payload.revision,'script');background.add_task(work,id,'rewrite',number,payload.instruction);return public(row)
+
+
+@router.post('/{id}/visuals',status_code=202)
+def collect_visuals(id:str,payload:ActionInput,background:BackgroundTasks,context=Depends(require_editor),db:Session=Depends(get_db)):
+    row=access(db,id,context[1]);data=json.loads(row.data)
+    if not data.get('plan'):raise HTTPException(409,'Wait for researched script generation.')
+    claim(db,row,payload.revision,'visuals');background.add_task(work,id,'visuals');return public(row)
+
+
+class TransitionInput(ActionInput):
+    transition:str='dissolve'
+
+
+@router.put('/{id}/scenes/{number}/transition')
+def set_transition(id:str,number:int,payload:TransitionInput,context=Depends(require_editor),db:Session=Depends(get_db)):
+    row=access(db,id,context[1]);data=json.loads(row.data)
+    if not data.get('plan') or not 1<=number<=len(data['plan']['scenes']):raise HTTPException(404,'Scene not found')
+    if payload.transition not in {'cut','dissolve','crossfade','slide','wipe','flash','zoomin','smoothleft','radial'}:raise HTTPException(422,'Unsupported transition')
+    claim(db,row,payload.revision,'script_review')
+    data['plan']['scenes'][number-1]['transition']=payload.transition
+    data.pop('video',None)
+    row.data=json.dumps(data,ensure_ascii=False);db.commit();return public(row)
 
 
 class LocalSceneInput(ActionInput):

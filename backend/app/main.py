@@ -12,7 +12,7 @@ from app.models import VideoJob
 from app.api import auth, channels, dashboard, members, personalities, videos
 from app.api import media, assets
 from app.api import library
-from app.api import title_shorts
+from app.api import title_shorts, studio
 from app.api import scene_layout
 from app.api import channel_defaults
 from app.database.migrate import migrate_database
@@ -83,6 +83,7 @@ generated_dir.mkdir(parents=True, exist_ok=True)
 app.include_router(media.router)
 app.include_router(scene_layout.router)
 app.include_router(title_shorts.router)
+app.include_router(studio.router)
 app.include_router(channel_defaults.router)
 
 @app.get("/api/health")

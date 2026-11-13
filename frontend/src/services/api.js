@@ -10,12 +10,14 @@ export function mediaUrl(path) {
 
 export async function api(path, options = {}) {
   const token = localStorage.getItem("token");
+  const workspaceId = localStorage.getItem("workspace_id");
   const response = await fetch(`${API_ROOT}/api${path}`, {
     ...options,
     credentials: "include",
     headers: {
       ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(workspaceId ? { "X-Workspace-Id": workspaceId } : {}),
       ...options.headers,
     },
   });

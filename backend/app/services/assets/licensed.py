@@ -235,54 +235,6 @@ class OpenverseAssetProvider:
         return []
 
 
-class LexicaAssetProvider:
-    def search(self, query):
-        from urllib.parse import quote
-        from app.services.assets.wikimedia import extract_core_keywords
-        clean_q = re.sub(r'\s+(?:archival\s+|modern\s+|historical\s+)?(?:photo(?:graph)?|image)\s*$', '', query, flags=re.I).strip()
-        candidates = []
-        for c in [extract_core_keywords(clean_q, max_words=3), clean_q, extract_core_keywords(clean_q, max_words=2)]:
-            if c and c not in candidates:
-                candidates.append(c)
-        for q in candidates:
-            try:
-                response = httpx.get(
-                    f'https://lexica.art/api/v1/search?q={quote(q)}',
-                    headers={'User-Agent': BROWSER_USER_AGENT, 'Accept': 'application/json'},
-                    timeout=15,
-                    follow_redirects=True,
-                    trust_env=False,
-                )
-                if response.status_code != 200:
-                    continue
-                images = response.json().get('images', [])
-                # Prefer portrait / high-res images first
-                images = sorted(images, key=lambda x: (1 if (x.get('height') or 0) >= (x.get('width') or 0) else 0, (x.get('height') or 0) * (x.get('width') or 0)), reverse=True)
-                results = []
-                for item in images[:10]:
-                    dl = item.get('src') or item.get('srcSmall')
-                    if not dl or not dl.startswith('https://'):
-                        continue
-                    prompt_text = (item.get('prompt') or q)[:200]
-                    results.append({
-                        'source': 'lexica',
-                        'url': f"https://lexica.art/prompt/{item.get('id', '')}" if item.get('id') else 'https://lexica.art/',
-                        'download_url': dl,
-                        'creator': 'Lexica Community',
-                        'license': 'CC0 1.0',
-                        'license_url': 'https://lexica.art/',
-                        'title': prompt_text,
-                        'description': f'Photograph of {prompt_text} ({query})',
-                        'width': item.get('width') or 1080,
-                        'height': item.get('height') or 1920,
-                    })
-                if results:
-                    return results
-            except Exception:
-                continue
-        return []
-
-
 def neutral_card(scene, output_dir, reason='No eligible real photograph found'):
     # A private sentinel keeps existing replacement/upload controls addressable.
     # It is never eligible for rendering.
@@ -332,7 +284,7 @@ def download_photo(item, scene, output_dir, kind):
     if cached.is_file() and cached.stat().st_size>15*1024*1024:raise ValueError('Cached photo exceeds size limit')
     if cached.is_file():
         body=cached.read_bytes()
-    elif item['source'] in {'openverse','lexica'}:
+    elif item['source'] == 'openverse':
         resp=httpx.get(item['download_url'],headers={'User-Agent':BROWSER_USER_AGENT},timeout=15,follow_redirects=True,trust_env=False)
         resp.raise_for_status()
         body=resp.content

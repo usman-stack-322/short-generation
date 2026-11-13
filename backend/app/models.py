@@ -480,6 +480,29 @@ class MediaUsage(Base):
     created_at=Column(DateTime(timezone=True),default=now_utc,nullable=False)
 
 
+class CelebrityFolder(Base):
+    __tablename__ = 'celebrity_folders'
+    workspace_id = Column(String, ForeignKey('workspaces.id'), primary_key=True)
+    folder_path = Column(Text, nullable=False)
+    preference = Column(String(30), default='mix_both', server_default='mix_both', nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False)
+
+
+class CelebrityAsset(Base):
+    __tablename__ = 'celebrity_assets'
+    id = Column(String, primary_key=True)
+    workspace_id = Column(String, ForeignKey('workspaces.id'), nullable=False, index=True)
+    celebrity_name = Column(String(200), nullable=False, index=True)
+    mood_tags = Column(Text, default='[]', server_default='[]', nullable=False)
+    media_type = Column(String(20), nullable=False)
+    file_name = Column(String(300), nullable=False)
+    file_path = Column(Text, nullable=False)
+    ext = Column(String(20), nullable=False)
+    duration = Column(Float)
+    content_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
+
+
 class TitleShortDraft(Base):
     __tablename__ = 'title_short_drafts'
     id = Column(String, primary_key=True)

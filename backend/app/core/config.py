@@ -13,11 +13,24 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     cors_origins: str = ""
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-flash-latest"
+    gemini_api_keys: str = ""
+    gemini_model: str = "gemini-2.5-flash"
     gemini_fallback_model: str = ""
+    gemini_fallback_models: str = "gemini-2.5-flash-lite,gemini-3.5-flash-lite,gemini-2.0-flash,gemini-flash-latest,gemma-3-27b-it"
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    openai_compat_base_url: str = ""
+    openai_compat_api_key: str = ""
+    openai_compat_model: str = ""
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = ""
+    ai_auto_detect_ollama: bool = True
     tts_provider: str = "local"
-    title_short_tts_provider: Literal["local", "kokoro_onnx", "elevenlabs"] = "local"
+    title_short_tts_provider: Literal["local", "kokoro_onnx", "elevenlabs", "gemini_tts"] = "local"
     title_short_voice: str = ""
+    title_short_voice_style: str = "Newscaster"
+    title_short_voice_pace: str = "Rapid"
+    title_short_voice_accent: str = "American English"
     title_short_ai_model: str = ""
     title_short_search_provider: Literal["bing_rss", "brave"] = "bing_rss"
     brave_search_api_key: str = ""
@@ -86,3 +99,61 @@ if not settings.app_secret_key:
     if not secret_file.exists():
         secret_file.write_text(secrets.token_urlsafe(48), encoding="utf-8")
     settings.app_secret_key = secret_file.read_text(encoding="utf-8").strip()
+
+
+RUNTIME_AI_FIELDS = (
+    "gemini_api_key",
+    "gemini_api_keys",
+    "gemini_model",
+    "gemini_fallback_model",
+    "gemini_fallback_models",
+    "title_short_ai_model",
+    "groq_api_key",
+    "groq_model",
+    "openai_compat_base_url",
+    "openai_compat_api_key",
+    "openai_compat_model",
+    "ollama_base_url",
+    "ollama_model",
+    "ai_auto_detect_ollama",
+)
+RUNTIME_AI_FILE = BACKEND_DIR / ".ai_providers.json"
+
+
+def apply_runtime_ai_overrides() -> None:
+    """Load persisted server-side AI provider overrides when present (skipped in pytest)."""
+    import json, sys
+    if "pytest" in sys.modules or settings.seed_demo:
+        return
+    if not RUNTIME_AI_FILE.is_file():
+        return
+    try:
+        data = json.loads(RUNTIME_AI_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for field in RUNTIME_AI_FIELDS:
+                if field in data and data[field] is not None:
+                    setattr(settings, field, data[field])
+    except Exception:
+        pass
+
+
+def save_runtime_ai_overrides(updates: dict) -> dict:
+    """Persist AI provider overrides on disk and update in-memory settings immediately."""
+    import json
+    existing = {}
+    if RUNTIME_AI_FILE.is_file():
+        try:
+            loaded = json.loads(RUNTIME_AI_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+    for field in RUNTIME_AI_FIELDS:
+        if field in updates and updates[field] is not None:
+            existing[field] = updates[field]
+            setattr(settings, field, updates[field])
+    RUNTIME_AI_FILE.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    return existing
+
+
+apply_runtime_ai_overrides()

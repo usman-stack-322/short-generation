@@ -55,12 +55,13 @@ def edit_timeline(duration, count, scenes=None, timing=None, script='', transiti
             beats = [{'start': i*duration/count, 'end': (i+1)*duration/count} for i in range(count)]
     changes = []
     for i, beat in enumerate(beats[1:], 1):
-        dissolve = bool(transitions and (scene_plan[i].get('transition_in')=='dissolve' if scene_plan else i % 2 == 1))
-        overlap = .2 if dissolve else 0.0
+        t_style = scene_plan[i].get('transition_in', 'dissolve') if scene_plan else ('dissolve' if i % 2 == 1 else 'cut')
+        dissolve = bool(transitions and t_style in {'dissolve', 'crossfade', 'slide', 'wipe', 'flash', 'zoomin', 'smoothleft', 'radial'})
+        overlap = .45 if dissolve else 0.0
         overlap = min(overlap, (beat['end']-beat['start'])/3,
                       (beats[i-1]['end']-beats[i-1]['start'])/3)
         changes.append({'at': beat['start'], 'offset': max(0, beat['start']-overlap/2),
-                        'duration': overlap, 'type': 'dissolve' if dissolve else 'cut'})
+                        'duration': overlap, 'type': 'dissolve' if dissolve else 'cut', 'transition': t_style})
     visual_starts = [0]+[c['offset'] for c in changes]
     segments = [(changes[i]['offset']+changes[i]['duration'] if i<len(changes) else duration)-start
                 for i, start in enumerate(visual_starts)]

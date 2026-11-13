@@ -68,3 +68,127 @@ def write_character_boundaries(audio,text,alignment,provider):
     path.with_suffix('.words.json').write_text(json.dumps(data,indent=2),encoding='utf8')
     if not load_boundaries(path,text):raise ValueError('Incomplete narration alignment')
     return data
+
+
+def _word_phonetic_weight(token: str) -> float:
+    cleaned = re.sub(r'[^a-zA-Z0-9]', '', token)
+    vowels = len(re.findall(r'[aeiouyAEIOUY]+', cleaned))
+    base = max(0.9, vowels * 0.95 + len(cleaned) * 0.14) if cleaned else max(0.8, len(token) * 0.4)
+    if re.search(r'[.!?؟。！？]["\'\)]*$', token):
+        base += 1.4
+    elif re.search(r'[,;:–—]["\'\)]*$', token):
+        base += 0.75
+    return base
+
+
+def write_acoustic_word_boundaries(audio, text: str, provider: str = 'Gemini Studio TTS'):
+    """Align spoken words to real WAV speech energy islands and pause valleys."""
+    import array
+    import math
+    import wave
+
+    path = Path(audio)
+    with wave.open(str(path), 'rb') as wf:
+        sr = wf.getframerate()
+        channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        nframes = wf.getnframes()
+        raw = wf.readframes(nframes)
+    duration = nframes / max(1, sr)
+    matches = list(re.finditer(r'\S+', text))
+    if not matches or duration <= 0 or sampwidth != 2:
+        raise ValueError('Cannot align empty script or unsupported WAV format')
+
+    samples = array.array('h')
+    samples.frombytes(raw)
+    if channels > 1:
+        samples = array.array('h', samples[::channels])
+
+    win = max(1, sr // 100)  # 10ms analysis frame
+    rms = []
+    for i in range(0, len(samples), win):
+        block = samples[i:i + win]
+        if not block:
+            break
+        rms.append(math.sqrt(sum(s * s for s in block) / len(block)))
+
+    peak = max(rms) if rms else 0.0
+    thresh = max(160.0, peak * 0.045)
+    active = [v >= thresh for v in rms]
+    # Bridge micro-dips (< 80ms = 8 frames) inside continuous words while preserving sentence pauses
+    gap = 0
+    for idx in range(len(active)):
+        if not active[idx]:
+            gap += 1
+        else:
+            if 0 < gap <= 8 and idx - gap > 0:
+                for k in range(idx - gap, idx):
+                    active[k] = True
+            gap = 0
+
+    islands = []
+    in_seg = False
+    seg_start = 0
+    for idx, flag in enumerate(active):
+        if flag and not in_seg:
+            seg_start = idx * 0.01
+            in_seg = True
+        elif not flag and in_seg:
+            seg_end = min(duration, idx * 0.01)
+            if seg_end - seg_start >= 0.05:
+                islands.append((seg_start, seg_end))
+            in_seg = False
+    if in_seg:
+        seg_end = duration
+        if seg_end - seg_start >= 0.05:
+            islands.append((seg_start, seg_end))
+
+    if not islands:
+        islands = [(0.0, duration)]
+
+    total_speech = sum(b - a for a, b in islands)
+    weights = [_word_phonetic_weight(m.group()) for m in matches]
+    total_weight = sum(weights) or 1.0
+
+    # Map normalized weight progress [0..1] monotonically onto real speech islands
+    cum_w = []
+    acc = 0.0
+    for w in weights:
+        cum_w.append((acc / total_weight, (acc + w) / total_weight))
+        acc += w
+
+    def map_pos(frac: float) -> float:
+        target = max(0.0, min(1.0, frac)) * total_speech
+        pos = 0.0
+        for a, b in islands:
+            span = b - a
+            if pos + span >= target - 1e-9:
+                return round(min(duration, a + (target - pos)), 4)
+            pos += span
+        return round(islands[-1][1], 4)
+
+    words = []
+    prev_start = 0.0
+    for m, (wf0, wf1) in zip(matches, cum_w):
+        w_start = max(prev_start, map_pos(wf0))
+        w_end = max(w_start, min(duration, map_pos(wf1)))
+        prev_start = w_start
+        words.append({
+            'char': m.start(),
+            'length': m.end() - m.start(),
+            'start': round(w_start, 4),
+            'end': round(w_end, 4),
+            'text': m.group(),
+        })
+
+    data = {
+        'provider': provider,
+        'script_sha256': hashlib.sha256(text.encode()).hexdigest(),
+        'audio_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+        'duration': round(duration, 4),
+        'words': words,
+    }
+    path.with_suffix('.words.json').write_text(json.dumps(data, indent=2), encoding='utf8')
+    if not load_boundaries(path, text):
+        raise ValueError('Incomplete acoustic narration alignment')
+    return data

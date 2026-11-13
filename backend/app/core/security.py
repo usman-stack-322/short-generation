@@ -6,7 +6,7 @@ import secrets
 import time
 from uuid import uuid4
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -47,6 +47,7 @@ def create_token(user_id: str) -> str:
 def current_context(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in to continue")
@@ -60,7 +61,14 @@ def current_context(
     except (ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
         raise HTTPException(status_code=401, detail="Invalid or expired session") from None
     user = db.get(User, body.get("sub"))
-    membership = db.query(WorkspaceMember).filter_by(user_id=user.id, active=True).first() if user else None
+    req_ws = request.headers.get("x-workspace-id") if request else None
+    membership = (
+        db.query(WorkspaceMember).filter_by(user_id=user.id, workspace_id=req_ws, active=True).first()
+        if (user and req_ws)
+        else None
+    )
+    if not membership and user:
+        membership = db.query(WorkspaceMember).filter_by(user_id=user.id, active=True).first()
     if not user or not membership:
         raise HTTPException(status_code=401, detail="Active workspace membership required")
     from datetime import datetime,timezone

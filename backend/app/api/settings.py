@@ -21,20 +21,65 @@ def languages(context=Depends(current_context)):
 
 @router.get('/api/settings')
 def get_settings(context=Depends(current_context),db:Session=Depends(get_db)):
+    from app.ai.smart_router import get_ai_status, has_any_ai_configured
     owner=context[1].role=='OWNER'
     workspace=db.get(Workspace,context[1].workspace_id)
+    ai_stat = get_ai_status()
     return {'workspace':{'id':workspace.id,'name':workspace.name},'preferences':preferences(db,context[1].workspace_id),
             'active_configuration':{'gemini_configured':bool(settings.gemini_api_key.strip()),
+                                    'ai_configured':has_any_ai_configured(),
                                     'primary_model':settings.gemini_model,
                                     'fallback_model_configured':bool(settings.gemini_fallback_model.strip()),
                                     'research_provider':preferences(db,context[1].workspace_id)['research_provider'],
-                                    'asset_provider':settings.asset_provider},
+                                    'asset_provider':settings.asset_provider,
+                                    'ai_status':ai_stat},
             'review_drafts_enabled':settings.review_drafts_enabled,
-            'providers':{'gemini':bool(settings.gemini_api_key.strip()),'google_oauth':bool(settings.google_client_id and settings.google_client_secret),
+            'providers':{'gemini':bool(settings.gemini_api_key.strip()),
+                         'groq':ai_stat['groq_configured'],
+                         'openai_compat':ai_stat['openai_compat_configured'],
+                         'ollama':bool(ai_stat['ollama_configured'] or ai_stat['ollama_detected_model']),
+                         'google_oauth':bool(settings.google_client_id and settings.google_client_secret),
                          'google_tts':bool(settings.google_tts_api_key or settings.google_application_credentials),'elevenlabs':bool(settings.elevenlabs_api_key)},
             'uploads_enabled':settings.youtube_uploads_enabled,
             'thumbnail_note':'The vertical cover is saved locally. Shorts custom cover availability varies by account and surface. No thumbnail API success is assumed; apply the cover in YouTube Studio where available.',
             'thumbnail_help':'https://support.google.com/youtube/answer/72431?hl=en'}
+
+
+@router.put('/api/settings/ai-providers')
+def update_ai_providers(payload: dict, context=Depends(require_owner), db: Session = Depends(get_db)):
+    from app.core.config import save_runtime_ai_overrides
+    from app.ai.smart_router import clear_cooldowns, get_ai_status
+    allowed_non_secret = (
+        'gemini_model', 'gemini_fallback_model', 'gemini_fallback_models',
+        'groq_model', 'openai_compat_base_url', 'openai_compat_model',
+        'ollama_base_url', 'ollama_model', 'ai_auto_detect_ollama', 'title_short_ai_model',
+    )
+    allowed_secrets = ('gemini_api_key', 'gemini_api_keys', 'groq_api_key', 'openai_compat_api_key')
+    updates = {}
+    for k in allowed_non_secret:
+        if k in payload and payload[k] is not None:
+            updates[k] = payload[k] if isinstance(payload[k], bool) else str(payload[k]).strip()
+    for k in allowed_secrets:
+        val = str(payload.get(k, '') or '').strip()
+        if val:
+            updates[k] = val
+    # Allow explicit clearing if requested
+    for k in payload.get('clear_fields', []) or []:
+        if k in (*allowed_secrets, 'title_short_ai_model', 'ollama_model', 'openai_compat_base_url', 'openai_compat_model'):
+            updates[k] = ''
+    save_runtime_ai_overrides(updates)
+    clear_cooldowns()
+    from app.api.members import audit
+    audit(db, context[1], context[1], 'ai_providers_updated', {'fields': sorted(updates.keys())})
+    db.commit()
+    return {'ok': True, 'ai_status': get_ai_status()}
+
+
+@router.post('/api/settings/ai-test')
+def run_ai_provider_test(context=Depends(require_owner)):
+    from app.ai.smart_router import clear_cooldowns, test_ai_providers
+    clear_cooldowns()
+    return test_ai_providers()
 
 
 @router.put('/api/settings')

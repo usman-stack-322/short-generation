@@ -11,13 +11,15 @@ import {
 
 const links = [
   ["/", "Dashboard", LayoutDashboard],
+  ["/title-to-short", "Create Short", WandSparkles],
+  ["/celebrity-library", "Celebrity Folder", Clapperboard],
+  ["/review-queue", "Review Queue", Sparkles],
   ["/channels", "My Channels", Youtube],
   ["/library", "Media Library", Clapperboard],
-  ["/title-to-short", "Create Short", WandSparkles],
   ["/videos", "My Videos", Clapperboard],
   ["/uploads", "Upload History", Youtube],
   ["/account", "Account Settings", Settings],
-  ["/team", "Admin Panel", Users],
+  ["/team", "Team Management", Users],
 ];
 
 export function Shell({ user, children }) {
@@ -25,6 +27,10 @@ export function Shell({ user, children }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [configuration, setConfiguration] = useState(null);
   const [workspace,setWorkspace] = useState(null);
+  const [workspaces,setWorkspaces] = useState([]);
+  useEffect(() => {
+    api('/workspaces').then(setWorkspaces).catch(() => {});
+  }, []);
   useEffect(() => {
     if (!menuOpen) return;
     const close = event => { if (event.key === 'Escape') setMenuOpen(false); };
@@ -40,7 +46,7 @@ export function Shell({ user, children }) {
     return () => { live = false; clearInterval(timer); window.removeEventListener('focus', load); };
   }, []);
   const providerLabel = !configuration ? 'Provider status unavailable' :
-    configuration.gemini_configured ? (configuration.research_provider === 'rss' ? 'Gemini + live RSS' : 'Gemini + demo research') :
+    (configuration.ai_configured || configuration.gemini_configured) ? (configuration.research_provider === 'rss' ? 'Smart AI Cascade + RSS' : 'Smart AI Cascade') :
     configuration.research_provider === 'rss' ? 'Live RSS / AI not configured' : 'Development providers';
   const [role,setRole] = useState(localStorage.getItem("role") || "MEMBER");
   useEffect(()=>{let live=true;const refresh=()=>api('/auth/me').then(me=>{if(live){localStorage.setItem('role',me.role);setRole(me.role);}}).catch(()=>{});refresh();const timer=setInterval(refresh,10000);window.addEventListener('focus',refresh);return()=>{live=false;clearInterval(timer);window.removeEventListener('focus',refresh);};},[]);
@@ -56,7 +62,28 @@ export function Shell({ user, children }) {
     <div className="app-shell">
       <aside className={`sidebar ${menuOpen ? "mobile-open" : ""}`}>
         <div className="brand"><BrandLogo compact /></div>
-        <div className="workspace-picker"><span className="workspace-logo">{workspace?.name?.slice(0,1).toUpperCase() || 'W'}</span><span className="workspace-name">{workspace?.name || 'Loading workspace…'}<small>Workspace</small></span><ChevronDown size={15} /></div>
+        <div className="workspace-picker">
+          <span className="workspace-logo">{workspace?.name?.slice(0,1).toUpperCase() || 'W'}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {workspaces.length > 1 ? (
+              <select
+                aria-label="Workspace switcher"
+                className="workspace-select-native"
+                value={localStorage.getItem('workspace_id') || workspace?.id || ''}
+                onChange={e => { localStorage.setItem('workspace_id', e.target.value); window.location.reload(); }}
+              >
+                {workspaces.map(w => (
+                  <option key={w.workspace_id} value={w.workspace_id} style={{ color: '#111' }}>
+                    {w.name} ({w.role})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="workspace-name">{workspace?.name || 'Owner workspace'}</div>
+            )}
+            <span className="role-badge-chip">{role}</span>
+          </div>
+        </div>
         <div className="nav-label">WORKSPACE</div>
         <nav aria-label="Workspace navigation">{links.filter(([to]) => (to !== "/team" || ["OWNER","ADMIN"].includes(role)) && (!["/create","/title-to-short"].includes(to) || role !== "VIEWER")).map(([to, label, Icon]) => <NavLink key={to} aria-label={label} title={label} to={to} onClick={() => setMenuOpen(false)} end={to === "/"} className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}><Icon size={17} /><span>{to === "/channels" && role !== "OWNER" ? "My Channels" : label}</span></NavLink>)}</nav>
         <div className="sidebar-bottom">
@@ -65,7 +92,7 @@ export function Shell({ user, children }) {
         </div>
       </aside>
       <main className="main-area">
-        <header className="topbar"><button className="mobile-menu icon-button" aria-label="Toggle navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><Menu size={18} /></button><div className="crumb">Workspace <span>/</span> <strong>Studio</strong></div><div className="topbar-actions"><span className="plan-chip"><span className="status-dot" /> {providerLabel}</span><AppearanceSelector /><Notifications /><div className="small-avatar">{(user?.name || "D").slice(0, 1).toUpperCase()}</div><span className="topbar-user">{user?.name || "Demo Owner"}</span></div></header>
+        <header className="topbar"><button className="mobile-menu icon-button" aria-label="Toggle navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><Menu size={18} /></button><div className="crumb">Workspace <span>/</span> <strong>Studio</strong></div><div className="topbar-actions"><button type="button" className="plan-chip" style={{cursor: ["OWNER","ADMIN"].includes(role) ? 'pointer' : 'default'}} onClick={() => ["OWNER","ADMIN"].includes(role) && navigate('/settings')} title="AI Provider & Quota Settings"><span className="status-dot" /> {providerLabel}</button><AppearanceSelector /><Notifications /><div className="small-avatar">{(user?.name || "D").slice(0, 1).toUpperCase()}</div><span className="topbar-user">{user?.name || "Demo Owner"}</span></div></header>
         <div className="page-content">{children}</div>
       </main>
     </div>
