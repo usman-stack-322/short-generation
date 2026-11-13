@@ -39,3 +39,8 @@ generated/subtitles/*
 !generated/music/
 generated/music/*
 !generated/music/.gitkeep
+
+# SQLite runtime files
+*.db-shm
+*.db-wal
+*.db-journal
