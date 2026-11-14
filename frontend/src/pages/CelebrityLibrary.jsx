@@ -92,12 +92,18 @@ export default function CelebrityLibrary() {
     vaultJob && ["scanning", "checking", "uploading", "indexing"].includes(vaultJob.phase)
   );
 
-  useEffect(() => {
-    const el = folderInputRef.current;
+  function setFolderInputNode(el) {
+    folderInputRef.current = el;
     if (!el) return;
     el.webkitdirectory = true;
     el.directory = true;
     el.mozdirectory = true;
+    el.setAttribute("webkitdirectory", "");
+    el.setAttribute("directory", "");
+  }
+
+  useEffect(() => {
+    setFolderInputNode(folderInputRef.current);
   }, []);
 
   async function load() {
@@ -223,23 +229,20 @@ export default function CelebrityLibrary() {
       });
     } catch (err) {
       const elapsed = Date.now() - openedAt;
-      const blockedByContext =
+      if (err?.name === "AbortError" && elapsed >= 400) {
+        setStatus("If Windows blocked Desktop, Downloads, or a drive root here, click Select Main Folder instead — it works on every folder.");
+        return;
+      }
+      if (
         err?.name === "SecurityError" ||
         err?.name === "NotAllowedError" ||
         err?.name === "TypeError" ||
-        (err?.name === "AbortError" && elapsed < 400);
-      if (blockedByContext) {
-        if (folderInputRef.current) {
-          setStatus("Opening standard folder browser (direct folder access can be restricted on protected folders like Desktop or Downloads).");
-          folderInputRef.current.click();
-        } else {
-          setError("Direct folder picker was blocked by the browser. Click Browse Folder instead.");
-        }
+        (err?.name === "AbortError" && elapsed < 400)
+      ) {
+        setStatus("Direct quick-handle picker isn't allowed here. Click the primary Select Main Folder button — it works on all folders.");
         return;
       }
-      if (err?.name !== "AbortError") {
-        setError(err?.message || "Could not open folder picker. Try Browse Folder instead.");
-      }
+      setError(err?.message || "Could not open quick folder sync. Click Select Main Folder instead.");
     }
   }
 
@@ -400,6 +403,17 @@ export default function CelebrityLibrary() {
             </div>
           )}
 
+          {!savedFolder?.handle && library?.total_assets > 0 && (
+            <div className="vault-saved-bar" style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                <CheckCircle2 size={16} color="#16a34a" />
+                <span style={{ fontWeight: 600, fontSize: 13 }}>
+                  Saved in workspace: {library.total_assets.toLocaleString()} clips across {library.celebrities.length} celebrities (reused automatically in Create Short).
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="studio-field">
             <label className="studio-label" htmlFor="vault-celeb-name">Celebrity Name (leave blank when uploading a Main Folder)</label>
             <input
@@ -422,37 +436,59 @@ export default function CelebrityLibrary() {
             }}
           >
             <p className="vault-helper-text">
-              One folder per person, named exactly like them — e.g. <code>LeBron James/</code>, <code>Prince Harry/</code>. Checks already-saved clips in seconds, uploads 6 batches in parallel, and keeps running when you change pages.
+              One folder per person, named exactly like them — e.g. <code>LeBron James/</code>, <code>Prince Harry/</code>. Checks already-saved clips in seconds, streams large videos in chunks, and keeps running when you change pages.
             </p>
             <div className="vault-upload-actions">
-              {supportsFolderPicker && (
-                <Button type="button" disabled={busy || uploadActive} onClick={pickMainFolderFast}>
-                  <FolderUp size={15} />
-                  <span>Select Main Folder</span>
-                </Button>
-              )}
-              <label className={`button ${supportsFolderPicker ? "button-secondary" : "button-primary"}`} style={{ cursor: "pointer", margin: 0 }}>
+              <label
+                className="button button-primary"
+                style={{
+                  cursor: busy || uploadActive ? "not-allowed" : "pointer",
+                  margin: 0,
+                  opacity: busy || uploadActive ? 0.6 : 1,
+                  pointerEvents: busy || uploadActive ? "none" : "auto",
+                }}
+              >
                 <FolderUp size={15} />
-                <span>{supportsFolderPicker ? "Browse Folder" : "Upload Main Folder"}</span>
+                <span>Select Main Folder</span>
                 <input
-                  ref={folderInputRef}
+                  ref={setFolderInputNode}
                   type="file"
                   multiple
                   webkitdirectory=""
                   directory=""
-                  style={{ display: "none" }}
+                  style={{ position: "fixed", left: "-9999px", width: 1, height: 1, opacity: 0 }}
                   disabled={busy || uploadActive}
                   onChange={(e) => { uploadBulkFiles(e.target.files); e.target.value = ""; }}
                 />
               </label>
-              <label className="button button-secondary" style={{ cursor: "pointer", margin: 0 }}>
+              {supportsFolderPicker && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy || uploadActive}
+                  onClick={pickMainFolderFast}
+                  title="Optional Chrome handle sync for quick 1-click re-sync of non-system folders"
+                >
+                  <FolderSync size={15} />
+                  <span>Auto-Sync Folder</span>
+                </Button>
+              )}
+              <label
+                className="button button-secondary"
+                style={{
+                  cursor: busy || uploadActive ? "not-allowed" : "pointer",
+                  margin: 0,
+                  opacity: busy || uploadActive ? 0.6 : 1,
+                  pointerEvents: busy || uploadActive ? "none" : "auto",
+                }}
+              >
                 <ImageIcon size={15} />
                 <span>Upload Files</span>
                 <input
                   type="file"
                   multiple
                   accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm,.mkv,.m4v"
-                  style={{ display: "none" }}
+                  style={{ position: "fixed", left: "-9999px", width: 1, height: 1, opacity: 0 }}
                   disabled={busy || uploadActive}
                   onChange={(e) => { uploadBulkFiles(e.target.files); e.target.value = ""; }}
                 />

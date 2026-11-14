@@ -402,7 +402,8 @@ export function UploadProvider({ children }) {
   const startVaultUpload = useCallback(async ({ rawItems, celebrityName = "", preference = "mix_both" }) => {
     const valid = (rawItems || []).filter(({ file, relPath }) => {
       const name = relPath || file?.name || "";
-      return ALLOWED_VAULT_EXT_RE.test(name) && !name.split("/").pop()?.startsWith(".tmp_") && (file?.size || 0) > 0;
+      const base = name.split(/[/\\]/).pop() || "";
+      return ALLOWED_VAULT_EXT_RE.test(name) && !base.startsWith(".tmp_") && (file?.size || 0) > 0;
     });
     if (!valid.length) {
       setVaultJob({
