@@ -342,12 +342,14 @@ def upload_bulk(
     celebrity_name: str = Form(''),
     skip_scan: bool = Form(False),
     skip_existing: bool = Form(True),
+    defer_index: bool = Form(False),
     files: list[UploadFile] = File(...),
     context=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     workspace_id = context[1].workspace_id
     root, folder_row = _vault_root(db, workspace_id)
+    should_defer_index = defer_index is True
     saved = 0
     skipped = 0
     saved_paths: list[Path] = []
@@ -359,19 +361,21 @@ def upload_bulk(
             file_size = getattr(f, 'size', None) or 0
             if skip_existing and file_size > 0 and out_path.is_file() and out_path.stat().st_size == file_size:
                 skipped += 1
-                saved_paths.append(out_path)
+                if not should_defer_index:
+                    saved_paths.append(out_path)
                 continue
             out_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = out_path.with_name(f'.tmp_{uuid4().hex[:8]}_{out_path.name}')
             try:
                 with tmp_path.open('wb') as dst:
-                    shutil.copyfileobj(f.file, dst, length=1024 * 1024)
+                    shutil.copyfileobj(f.file, dst, length=4 * 1024 * 1024)
                 if tmp_path.stat().st_size == 0:
                     tmp_path.unlink(missing_ok=True)
                     continue
                 os.replace(tmp_path, out_path)
                 saved += 1
-                saved_paths.append(out_path)
+                if not should_defer_index:
+                    saved_paths.append(out_path)
             except Exception:
                 tmp_path.unlink(missing_ok=True)
                 raise
@@ -383,7 +387,7 @@ def upload_bulk(
     if saved == 0 and skipped == 0 and not skip_scan:
         raise HTTPException(422, 'No supported image (.jpg/.png/.webp) or video (.mp4/.mov/.webm) files uploaded.')
     if skip_scan:
-        if saved_paths:
+        if saved_paths and not should_defer_index:
             index_vault_files(db, workspace_id, root, saved_paths)
         return {'saved': saved, 'skipped': skipped, 'scanning': False, 'folder_path': str(root)}
     summary = scan_celebrity_folder(db, workspace_id, str(root), folder_row.preference if folder_row else 'mix_both')
@@ -428,7 +432,7 @@ def upload_vault_chunk(
     chunk_tmp = stage_dir / f'c_{chunk_index:06d}.tmp'
     try:
         with chunk_tmp.open('wb') as dst:
-            shutil.copyfileobj(file.file, dst, length=1024 * 1024)
+            shutil.copyfileobj(file.file, dst, length=4 * 1024 * 1024)
         os.replace(chunk_tmp, chunk_file)
     except Exception:
         chunk_tmp.unlink(missing_ok=True)
@@ -446,10 +450,12 @@ def upload_vault_chunk(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     assembled_tmp = out_path.with_name(f'.tmp_{uuid4().hex[:8]}_{out_path.name}')
     try:
-        with assembled_tmp.open('wb') as out_dst:
-            for part in all_chunks:
-                with part.open('rb') as src_part:
-                    shutil.copyfileobj(src_part, out_dst, length=1024 * 1024)
+        os.replace(all_chunks[0], assembled_tmp)
+        if len(all_chunks) > 1:
+            with assembled_tmp.open('ab') as out_dst:
+                for part in all_chunks[1:]:
+                    with part.open('rb') as src_part:
+                        shutil.copyfileobj(src_part, out_dst, length=4 * 1024 * 1024)
         if assembled_tmp.stat().st_size <= 0:
             assembled_tmp.unlink(missing_ok=True)
             raise HTTPException(422, 'Uploaded chunked file was empty.')

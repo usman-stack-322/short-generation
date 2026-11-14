@@ -5,19 +5,22 @@ import {
   canonicalVaultRel,
   clearSavedDirectoryHandle,
   ensureDirectoryPermission,
+  getCachedVaultManifest,
   getSavedDirectoryHandle,
+  saveCachedVaultManifest,
   saveDirectoryHandle,
   walkDirectoryHandleParallel,
 } from "../utils/folderStore";
 
 const ALLOWED_VAULT_EXT_RE = /\.(jpg|jpeg|png|webp|mp4|mov|webm|mkv|m4v)$/i;
 const ALLOWED_LIBRARY_IMG_RE = /\.(jpe?g|png|webp)$/i;
-const MAX_BATCH_FILES = 25;
-const MAX_BATCH_BYTES = 15 * 1024 * 1024;
-const LARGE_FILE_THRESHOLD = 15 * 1024 * 1024;
-const CHUNK_BYTES = 8 * 1024 * 1024;
-const VAULT_CONCURRENCY = 6;
-const LIBRARY_CONCURRENCY = 4;
+const MAX_BATCH_FILES = 80;
+const MAX_BATCH_BYTES = 45 * 1024 * 1024;
+const LARGE_FILE_THRESHOLD = 45 * 1024 * 1024;
+const CHUNK_BYTES = 16 * 1024 * 1024;
+const CHUNK_CONCURRENCY = 3;
+const VAULT_CONCURRENCY = 8;
+const LIBRARY_CONCURRENCY = 8;
 
 const UploadContext = createContext(null);
 
@@ -27,6 +30,18 @@ function formatBytes(bytes) {
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
+}
+
+function formatEta(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  const s = Math.ceil(seconds);
+  if (s < 60) return `${s}s left`;
+  const m = Math.floor(s / 60);
+  const remS = s % 60;
+  if (m < 60) return remS > 0 ? `${m}m ${remS}s left` : `${m}m left`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}h ${remM}m left`;
 }
 
 function buildBatches(items) {
@@ -149,6 +164,9 @@ export function UploadProvider({ children }) {
 
   const executeVaultItems = useCallback(async (valid, { celebrityName = "", preference = "mix_both", controller, startedAt, workspaceId }) => {
     let uploadedFilesCount = 0;
+    const wsCacheKey = workspaceId || workspaceKey();
+    let existingMap = {};
+    let serverFolderPath = "";
     try {
       setVaultJob({
         id: startedAt,
@@ -165,28 +183,32 @@ export function UploadProvider({ children }) {
         message: `Checking clips 0 / ${valid.length}…`,
       });
 
-      // Fast compressed O(1) manifest comparison; degrade cleanly if backend lacks /assets/manifest
-      let existingMap = {};
-      let serverFolderPath = "";
+      // Fast compressed O(1) manifest comparison + local IndexedDB cache fallback if backend lacks /assets/manifest
+      const cachedManifest = await getCachedVaultManifest(wsCacheKey);
+      existingMap = { ...cachedManifest };
+      let chunkEndpointMissing = false;
       try {
         const manifestRes = await api("/assets/manifest", {
           signal: controller.signal,
           headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
         });
-        existingMap = manifestRes?.files || {};
+        existingMap = { ...(manifestRes?.files || {}) };
         serverFolderPath = manifestRes?.folder_path || "";
+        saveCachedVaultManifest(wsCacheKey, existingMap);
       } catch (manifestErr) {
         if (manifestErr?.name === "AbortError" || controller.signal.aborted) throw manifestErr;
         if (manifestErr?.status !== 404) throw manifestErr;
+        chunkEndpointMissing = true;
       }
       const toUpload = [];
       let skippedCount = 0;
 
-      const STEP = 350;
+      const STEP = 500;
       for (let i = 0; i < valid.length; i++) {
         if (controller.signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
         const item = valid[i];
         const relKey = canonicalVaultRel(item.relPath || item.file.webkitRelativePath || item.file.name, celebrityName);
+        item.relKey = relKey;
         const remoteSize = existingMap[relKey];
         if (remoteSize && remoteSize === item.file.size) {
           skippedCount++;
@@ -241,10 +263,11 @@ export function UploadProvider({ children }) {
         return;
       }
 
-      // Parallel 6-worker upload: small clips in 15MB batches, large videos in resumable 8MB chunks
+      // Sort smallest files first so photos and short clips finish in seconds while larger videos stream next
+      const sortedToUpload = [...toUpload].sort((a, b) => (a.file.size || 0) - (b.file.size || 0));
       const smallItems = [];
       const largeItems = [];
-      for (const item of toUpload) {
+      for (const item of sortedToUpload) {
         if ((item.file.size || 0) > LARGE_FILE_THRESHOLD) {
           largeItems.push(item);
         } else {
@@ -255,7 +278,7 @@ export function UploadProvider({ children }) {
         ...buildBatches(smallItems).map((batch) => ({ kind: "batch", items: batch })),
         ...largeItems.map((item) => ({ kind: "chunked", item })),
       ];
-      const totalUploadBytes = toUpload.reduce((sum, x) => sum + (x.file.size || 0), 0);
+      const totalUploadBytes = sortedToUpload.reduce((sum, x) => sum + (x.file.size || 0), 0);
       const taskLoaded = new Array(uploadTasks.length).fill(0);
       const taskTotals = uploadTasks.map((t) =>
         t.kind === "batch"
@@ -264,11 +287,25 @@ export function UploadProvider({ children }) {
       );
       let nextTaskIndex = 0;
       let skippedOnServer = 0;
-      let chunkEndpointMissing = false;
       let lastUiTick = 0;
       let lastLiveRefreshMs = Date.now();
+      let lastCacheSaveMs = Date.now();
       let lastRefreshedCount = 0;
       const uploadStartMs = Date.now();
+
+      const markUploadedInCache = (items) => {
+        for (const it of items) {
+          const key = it.relKey || canonicalVaultRel(it.relPath || it.file.webkitRelativePath || it.file.name, celebrityName);
+          if (key && it.file?.size > 0) {
+            existingMap[key] = it.file.size;
+          }
+        }
+        const now = Date.now();
+        if (now - lastCacheSaveMs > 4000) {
+          lastCacheSaveMs = now;
+          saveCachedVaultManifest(wsCacheKey, existingMap);
+        }
+      };
 
       const updateProgress = (force = false) => {
         const now = Date.now();
@@ -279,8 +316,15 @@ export function UploadProvider({ children }) {
           lastRefreshedCount = uploadedFilesCount;
           setVaultVersion((v) => v + 1);
         }
-        const loaded = taskLoaded.reduce((a, b) => a + b, 0);
+        const loaded = Math.min(
+          totalUploadBytes,
+          taskLoaded.reduce((a, b) => a + b, 0)
+        );
         const elapsedSec = Math.max(0.2, (now - uploadStartMs) / 1000);
+        const speedBps = loaded / elapsedSec;
+        const remainingBytes = Math.max(0, totalUploadBytes - loaded);
+        const etaSec = speedBps > 1024 ? remainingBytes / speedBps : 0;
+        const etaLabel = formatEta(etaSec);
         setVaultJob((cur) => {
           if (!cur || cur.id !== startedAt) return cur;
           return {
@@ -288,13 +332,14 @@ export function UploadProvider({ children }) {
             phase: "uploading",
             checkedFiles: valid.length,
             totalFiles: valid.length,
-            newFilesTotal: toUpload.length,
+            newFilesTotal: sortedToUpload.length,
             uploadedFiles: uploadedFilesCount,
             skippedFiles: skippedCount + skippedOnServer,
             totalBytes: totalUploadBytes,
-            loadedBytes: Math.min(loaded, totalUploadBytes),
-            speedBps: loaded / elapsedSec,
-            message: `Uploading clips ${uploadedFilesCount.toLocaleString()}/${toUpload.length.toLocaleString()}${skippedCount ? ` · ${skippedCount.toLocaleString()} already saved skipped` : ""}`,
+            loadedBytes: loaded,
+            speedBps,
+            etaSec,
+            message: `Uploading clips ${uploadedFilesCount.toLocaleString()}/${sortedToUpload.length.toLocaleString()}${skippedCount ? ` · ${skippedCount.toLocaleString()} already saved skipped` : ""}${etaLabel ? ` · ${etaLabel}` : ""}`,
           };
         });
       };
@@ -307,6 +352,7 @@ export function UploadProvider({ children }) {
           fd.append("celebrity_name", celebrityName);
           fd.append("skip_scan", "true");
           fd.append("skip_existing", "true");
+          fd.append("defer_index", "true");
           for (const { file, relPath } of batch) {
             fd.append("files", file, relPath || file.webkitRelativePath || file.name);
           }
@@ -329,45 +375,71 @@ export function UploadProvider({ children }) {
         const totalChunks = Math.max(1, Math.ceil(totalSize / CHUNK_BYTES));
         const uploadId = `${Date.now().toString(36)}_${taskIdx}_${Math.random().toString(36).slice(2, 10)}`;
         const resolvedRel = relPath || file.webkitRelativePath || file.name;
-        let finalRes = null;
+        const chunkLoaded = new Array(totalChunks).fill(0);
+
+        const syncChunkProgress = (force = false) => {
+          taskLoaded[taskIdx] = Math.min(
+            totalSize,
+            chunkLoaded.reduce((a, b) => a + b, 0)
+          );
+          updateProgress(force);
+        };
+
+        const sendSingleChunk = async (chunkIdx) => {
+          const start = chunkIdx * CHUNK_BYTES;
+          const end = Math.min(totalSize, start + CHUNK_BYTES);
+          const slice = file.slice(start, end);
+          const res = await runWithRetry(async () => {
+            const fd = new FormData();
+            fd.append("relative_path", resolvedRel);
+            fd.append("celebrity_name", celebrityName);
+            fd.append("upload_id", uploadId);
+            fd.append("chunk_index", String(chunkIdx));
+            fd.append("total_chunks", String(totalChunks));
+            fd.append("total_size", String(totalSize));
+            fd.append("file", slice, file.name);
+            return apiUpload("/assets/upload-chunk", fd, {
+              workspaceId,
+              signal: controller.signal,
+              onProgress: (loaded) => {
+                chunkLoaded[chunkIdx] = Math.min(end - start, loaded);
+                syncChunkProgress(false);
+              },
+            });
+          }, controller.signal);
+          chunkLoaded[chunkIdx] = end - start;
+          syncChunkProgress(false);
+          return res;
+        };
 
         try {
-          for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
-            if (controller.signal.aborted) return finalRes;
-            const start = chunkIdx * CHUNK_BYTES;
-            const end = Math.min(totalSize, start + CHUNK_BYTES);
-            const slice = file.slice(start, end);
-
-            finalRes = await runWithRetry(async () => {
-              const fd = new FormData();
-              fd.append("relative_path", resolvedRel);
-              fd.append("celebrity_name", celebrityName);
-              fd.append("upload_id", uploadId);
-              fd.append("chunk_index", String(chunkIdx));
-              fd.append("total_chunks", String(totalChunks));
-              fd.append("total_size", String(totalSize));
-              fd.append("file", slice, file.name);
-              return apiUpload("/assets/upload-chunk", fd, {
-                workspaceId,
-                signal: controller.signal,
-                onProgress: (loaded) => {
-                  taskLoaded[taskIdx] = Math.min(totalSize, start + loaded);
-                  updateProgress(false);
-                },
-              });
-            }, controller.signal);
-
-            if (finalRes?.skipped) {
-              taskLoaded[taskIdx] = totalSize;
-              return finalRes;
-            }
-            taskLoaded[taskIdx] = end;
-            updateProgress(false);
+          // Send chunk 0 first to detect 404 or server-side deduplication before parallelizing middle chunks
+          const firstRes = await sendSingleChunk(0);
+          if (firstRes?.skipped || totalChunks === 1) {
+            taskLoaded[taskIdx] = totalSize;
+            return firstRes;
           }
-          return finalRes;
+
+          if (totalChunks > 2) {
+            let nextMiddleIdx = 1;
+            const lastMiddleIdx = totalChunks - 2;
+            const middleWorkerCount = Math.min(CHUNK_CONCURRENCY, lastMiddleIdx);
+            await Promise.all(
+              Array.from({ length: middleWorkerCount }, async () => {
+                while (!controller.signal.aborted) {
+                  const cIdx = nextMiddleIdx++;
+                  if (cIdx > lastMiddleIdx) return;
+                  await sendSingleChunk(cIdx);
+                }
+              })
+            );
+          }
+
+          if (controller.signal.aborted) return firstRes;
+          // Send final chunk last so server assembly triggers cleanly once all prior chunks exist
+          return await sendSingleChunk(totalChunks - 1);
         } catch (chunkErr) {
           if (chunkErr?.status === 404) {
-            // Live backend hasn't rolled out /assets/upload-chunk yet; fall back cleanly to upload-bulk
             chunkEndpointMissing = true;
             taskLoaded[taskIdx] = 0;
             return uploadBulkBatch(taskIdx, [item]);
@@ -389,12 +461,14 @@ export function UploadProvider({ children }) {
             taskLoaded[idx] = taskTotals[idx];
             uploadedFilesCount += res?.saved ?? 1;
             skippedOnServer += res?.skipped ?? 0;
+            markUploadedInCache([task.item]);
           } else {
             const batch = task.items;
             res = await uploadBulkBatch(idx, batch);
             taskLoaded[idx] = taskTotals[idx];
             uploadedFilesCount += res?.saved ?? batch.length;
             skippedOnServer += res?.skipped ?? 0;
+            markUploadedInCache(batch);
           }
           if (res?.folder_path) serverFolderPath = res.folder_path;
           updateProgress(true);
@@ -403,6 +477,7 @@ export function UploadProvider({ children }) {
 
       const workerCount = Math.min(VAULT_CONCURRENCY, uploadTasks.length);
       await Promise.all(Array.from({ length: workerCount }, () => worker()));
+      saveCachedVaultManifest(wsCacheKey, existingMap);
 
       setVaultJob((cur) => cur && {
         ...cur,
@@ -436,6 +511,9 @@ export function UploadProvider({ children }) {
       });
     } catch (err) {
       const isCancelled = err?.name === "AbortError" || controller.signal.aborted;
+      if (uploadedFilesCount > 0) {
+        saveCachedVaultManifest(wsCacheKey, existingMap);
+      }
       if (isCancelled || uploadedFilesCount > 0) {
         try {
           await rescanVaultWithFallback({

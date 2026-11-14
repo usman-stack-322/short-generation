@@ -97,6 +97,38 @@ export async function clearSavedDirectoryHandle(workspaceKey) {
   } catch {}
 }
 
+export async function getCachedVaultManifest(workspaceKey) {
+  try {
+    const db = await openHandleDb();
+    const record = await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const req = tx.objectStore(STORE_NAME).get(`manifest_${workspaceKey || "default"}`);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    return record?.files && typeof record.files === "object" ? record.files : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function saveCachedVaultManifest(workspaceKey, files) {
+  try {
+    const db = await openHandleDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put(
+        { files: files || {}, updatedAt: Date.now() },
+        `manifest_${workspaceKey || "default"}`
+      );
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {}
+}
+
 export async function ensureDirectoryPermission(handle) {
   if (!handle) return false;
   try {
@@ -135,7 +167,7 @@ export async function walkDirectoryHandleParallel(dirHandle, onProgress, signal)
               }
             }).catch(() => {})
           );
-          if (filePromises.length >= 64) {
+          if (filePromises.length >= 128) {
             await Promise.all(filePromises.splice(0));
             const now = Date.now();
             if (onProgress && now - lastTick > 80) {
@@ -158,10 +190,10 @@ export async function walkDirectoryHandleParallel(dirHandle, onProgress, signal)
     }
   }
 
-  // Drain BFS directory queue with up to 6 concurrent directory scanners
+  // Drain BFS directory queue with up to 12 concurrent directory scanners
   while (queue.length > 0) {
     if (signal?.aborted) throw new DOMException("Upload cancelled", "AbortError");
-    const wave = queue.splice(0, 6);
+    const wave = queue.splice(0, 12);
     await Promise.all(wave.map((node) => processDir(node)));
   }
   if (onProgress) onProgress(items.length);
