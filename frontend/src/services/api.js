@@ -37,7 +37,10 @@ export async function api(path, options = {}) {
     window.location.replace('/login');
   }
   if (!response.ok) {
-    throw new Error(formatApiError(body, response.status));
+    const err = new Error(formatApiError(body, response.status));
+    err.status = response.status;
+    err.path = path;
+    throw err;
   }
   if (token && path !== '/auth/media-session') {
     if (mediaSessionToken !== token) {
@@ -88,7 +91,10 @@ export function apiUpload(path, formData, { workspaceId, signal, onProgress } = 
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body);
       } else {
-        reject(new Error(formatApiError(body, xhr.status)));
+        const err = new Error(formatApiError(body, xhr.status));
+        err.status = xhr.status;
+        err.path = path;
+        reject(err);
       }
     };
 

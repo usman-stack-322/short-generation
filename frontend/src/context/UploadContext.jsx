@@ -54,6 +54,8 @@ async function runWithRetry(fn, signal, retries = 2) {
       return await fn();
     } catch (err) {
       if (err?.name === "AbortError" || signal?.aborted) throw err;
+      // Do not retry deterministic 4xx client/route errors (e.g. 401, 403, 404, 413, 422)
+      if (err?.status >= 400 && err?.status < 500) throw err;
       attempt++;
       if (attempt > retries) throw err;
       await new Promise((r) => setTimeout(r, 700 * attempt));
@@ -134,12 +136,18 @@ export function UploadProvider({ children }) {
         message: `Checking clips 0 / ${valid.length}…`,
       });
 
-      // Fast compressed O(1) manifest comparison instead of serial server roundtrips
-      const manifestRes = await api("/assets/manifest", {
-        signal: controller.signal,
-        headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
-      });
-      const existingMap = manifestRes?.files || {};
+      // Fast compressed O(1) manifest comparison; degrade cleanly if backend lacks /assets/manifest
+      let existingMap = {};
+      try {
+        const manifestRes = await api("/assets/manifest", {
+          signal: controller.signal,
+          headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
+        });
+        existingMap = manifestRes?.files || {};
+      } catch (manifestErr) {
+        if (manifestErr?.name === "AbortError" || controller.signal.aborted) throw manifestErr;
+        if (manifestErr?.status !== 404) throw manifestErr;
+      }
       const toUpload = [];
       let skippedCount = 0;
 
@@ -224,6 +232,7 @@ export function UploadProvider({ children }) {
       );
       let nextTaskIndex = 0;
       let skippedOnServer = 0;
+      let chunkEndpointMissing = false;
       let lastUiTick = 0;
       let lastLiveRefreshMs = Date.now();
       let lastRefreshedCount = 0;
@@ -260,46 +269,79 @@ export function UploadProvider({ children }) {
 
       updateProgress(true);
 
-      const uploadChunkedLargeFile = async (taskIdx, { file, relPath }) => {
+      const uploadBulkBatch = (taskIdx, batch) =>
+        runWithRetry(async () => {
+          const fd = new FormData();
+          fd.append("celebrity_name", celebrityName);
+          fd.append("skip_scan", "true");
+          fd.append("skip_existing", "true");
+          for (const { file, relPath } of batch) {
+            fd.append("files", file, relPath || file.webkitRelativePath || file.name);
+          }
+          return apiUpload("/assets/upload-bulk", fd, {
+            workspaceId,
+            signal: controller.signal,
+            onProgress: (loaded, total) => {
+              taskLoaded[taskIdx] = Math.min(loaded, total || taskTotals[taskIdx]);
+              updateProgress(false);
+            },
+          });
+        }, controller.signal);
+
+      const uploadChunkedLargeFile = async (taskIdx, item) => {
+        if (chunkEndpointMissing) {
+          return uploadBulkBatch(taskIdx, [item]);
+        }
+        const { file, relPath } = item;
         const totalSize = file.size || 0;
         const totalChunks = Math.max(1, Math.ceil(totalSize / CHUNK_BYTES));
         const uploadId = `${Date.now().toString(36)}_${taskIdx}_${Math.random().toString(36).slice(2, 10)}`;
         const resolvedRel = relPath || file.webkitRelativePath || file.name;
         let finalRes = null;
 
-        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
-          if (controller.signal.aborted) return finalRes;
-          const start = chunkIdx * CHUNK_BYTES;
-          const end = Math.min(totalSize, start + CHUNK_BYTES);
-          const slice = file.slice(start, end);
+        try {
+          for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+            if (controller.signal.aborted) return finalRes;
+            const start = chunkIdx * CHUNK_BYTES;
+            const end = Math.min(totalSize, start + CHUNK_BYTES);
+            const slice = file.slice(start, end);
 
-          finalRes = await runWithRetry(async () => {
-            const fd = new FormData();
-            fd.append("relative_path", resolvedRel);
-            fd.append("celebrity_name", celebrityName);
-            fd.append("upload_id", uploadId);
-            fd.append("chunk_index", String(chunkIdx));
-            fd.append("total_chunks", String(totalChunks));
-            fd.append("total_size", String(totalSize));
-            fd.append("file", slice, file.name);
-            return apiUpload("/assets/upload-chunk", fd, {
-              workspaceId,
-              signal: controller.signal,
-              onProgress: (loaded) => {
-                taskLoaded[taskIdx] = Math.min(totalSize, start + loaded);
-                updateProgress(false);
-              },
-            });
-          }, controller.signal);
+            finalRes = await runWithRetry(async () => {
+              const fd = new FormData();
+              fd.append("relative_path", resolvedRel);
+              fd.append("celebrity_name", celebrityName);
+              fd.append("upload_id", uploadId);
+              fd.append("chunk_index", String(chunkIdx));
+              fd.append("total_chunks", String(totalChunks));
+              fd.append("total_size", String(totalSize));
+              fd.append("file", slice, file.name);
+              return apiUpload("/assets/upload-chunk", fd, {
+                workspaceId,
+                signal: controller.signal,
+                onProgress: (loaded) => {
+                  taskLoaded[taskIdx] = Math.min(totalSize, start + loaded);
+                  updateProgress(false);
+                },
+              });
+            }, controller.signal);
 
-          if (finalRes?.skipped) {
-            taskLoaded[taskIdx] = totalSize;
-            return finalRes;
+            if (finalRes?.skipped) {
+              taskLoaded[taskIdx] = totalSize;
+              return finalRes;
+            }
+            taskLoaded[taskIdx] = end;
+            updateProgress(false);
           }
-          taskLoaded[taskIdx] = end;
-          updateProgress(false);
+          return finalRes;
+        } catch (chunkErr) {
+          if (chunkErr?.status === 404) {
+            // Live backend hasn't rolled out /assets/upload-chunk yet; fall back cleanly to upload-bulk
+            chunkEndpointMissing = true;
+            taskLoaded[taskIdx] = 0;
+            return uploadBulkBatch(taskIdx, [item]);
+          }
+          throw chunkErr;
         }
-        return finalRes;
       };
 
       const worker = async () => {
@@ -317,23 +359,7 @@ export function UploadProvider({ children }) {
             skippedOnServer += res?.skipped ?? 0;
           } else {
             const batch = task.items;
-            res = await runWithRetry(async () => {
-              const fd = new FormData();
-              fd.append("celebrity_name", celebrityName);
-              fd.append("skip_scan", "true");
-              fd.append("skip_existing", "true");
-              for (const { file, relPath } of batch) {
-                fd.append("files", file, relPath || file.webkitRelativePath || file.name);
-              }
-              return apiUpload("/assets/upload-bulk", fd, {
-                workspaceId,
-                signal: controller.signal,
-                onProgress: (loaded, total) => {
-                  taskLoaded[idx] = Math.min(loaded, total || taskTotals[idx]);
-                  updateProgress(false);
-                },
-              });
-            }, controller.signal);
+            res = await uploadBulkBatch(idx, batch);
             taskLoaded[idx] = taskTotals[idx];
             uploadedFilesCount += res?.saved ?? batch.length;
             skippedOnServer += res?.skipped ?? 0;
@@ -351,11 +377,19 @@ export function UploadProvider({ children }) {
         loadedBytes: totalUploadBytes,
         message: "Finalizing library index…",
       });
-      const scan = await api("/assets/rescan", {
-        method: "POST",
-        headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
-        body: JSON.stringify({ preference }),
-      });
+      let totalIndexedCount = uploadedFilesCount + skippedCount + skippedOnServer;
+      try {
+        const scan = await api("/assets/rescan", {
+          method: "POST",
+          headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
+          body: JSON.stringify({ preference }),
+        });
+        if (typeof scan?.total_assets === "number") {
+          totalIndexedCount = scan.total_assets;
+        }
+      } catch (rescanErr) {
+        if (rescanErr?.status !== 404) throw rescanErr;
+      }
       setVaultVersion((v) => v + 1);
       setVaultJob({
         id: startedAt,
@@ -369,7 +403,7 @@ export function UploadProvider({ children }) {
         loadedBytes: totalUploadBytes,
         speedBps: 0,
         startedAt,
-        message: `Done! Uploaded ${uploadedFilesCount.toLocaleString()} new clips${skippedCount ? `, skipped ${skippedCount.toLocaleString()} existing` : ""}. Total indexed: ${scan.total_assets.toLocaleString()}.`,
+        message: `Done! Uploaded ${uploadedFilesCount.toLocaleString()} new clips${skippedCount ? `, skipped ${skippedCount.toLocaleString()} existing` : ""}. Total indexed: ${totalIndexedCount.toLocaleString()}.`,
       });
     } catch (err) {
       const isCancelled = err?.name === "AbortError" || controller.signal.aborted;
@@ -383,14 +417,15 @@ export function UploadProvider({ children }) {
           setVaultVersion((v) => v + 1);
         } catch {}
       }
+      const errDetail = err?.path ? `${err?.message || "Upload failed."} (${err.status || "error"} · ${err.path})` : (err?.message || "Upload failed.");
       setVaultJob((cur) => ({
         ...(cur || {}),
         id: startedAt,
         title: "Celebrity Clips Sync",
         phase: isCancelled ? "cancelled" : "error",
         message: isCancelled
-          ? "Upload stopped — completed files were saved & indexed. Click Sync Saved Folder anytime to resume."
-          : `${err?.message || "Upload failed."}${uploadedFilesCount > 0 ? ` (${uploadedFilesCount} completed clips saved — re-sync to continue.)` : ""}`,
+          ? "Upload stopped — completed files were saved & indexed. Re-select or re-sync anytime to resume."
+          : `${errDetail}${uploadedFilesCount > 0 ? ` (${uploadedFilesCount} completed clips saved — re-sync to continue.)` : ""}`,
       }));
     } finally {
       if (vaultAbortRef.current === controller) {
