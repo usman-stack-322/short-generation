@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, mediaUrl } from "../services/api";
-import { useUploads } from "../context/UploadContext";
+import { rescanVaultWithFallback, useUploads } from "../context/UploadContext";
 import { PageHeader, EmptyState } from "../components/Shell";
 import { Button } from "../components/UI";
 import {
@@ -197,9 +197,10 @@ export default function CelebrityLibrary() {
     setError("");
     setStatus("");
     try {
-      const res = await api("/assets/rescan", {
-        method: "POST",
-        body: JSON.stringify({ preference }),
+      const res = await rescanVaultWithFallback({
+        preference,
+        fallbackFolderPath: (library?.folder_path || folderPath || "").trim(),
+        throwOnMissingFallback: true,
       });
       setStatus(`Library rescanned (${res.total_assets} assets across ${res.celebrities.length} celebrities).`);
       await load();

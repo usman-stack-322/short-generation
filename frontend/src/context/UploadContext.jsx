@@ -63,6 +63,35 @@ async function runWithRetry(fn, signal, retries = 2) {
   }
 }
 
+export async function rescanVaultWithFallback({
+  workspaceId,
+  preference,
+  signal,
+  fallbackFolderPath = "",
+  throwOnMissingFallback = false,
+} = {}) {
+  try {
+    return await api("/assets/rescan", {
+      method: "POST",
+      signal,
+      headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
+      body: JSON.stringify({ preference }),
+    });
+  } catch (err) {
+    if (err?.status !== 404) throw err;
+    if (fallbackFolderPath) {
+      return await api("/assets/connect-folder", {
+        method: "POST",
+        signal,
+        headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
+        body: JSON.stringify({ folder_path: fallbackFolderPath, preference }),
+      });
+    }
+    if (throwOnMissingFallback) throw err;
+    return null;
+  }
+}
+
 export function UploadProvider({ children }) {
   const [vaultJob, setVaultJob] = useState(null);
   const [libraryJob, setLibraryJob] = useState(null);
@@ -138,12 +167,14 @@ export function UploadProvider({ children }) {
 
       // Fast compressed O(1) manifest comparison; degrade cleanly if backend lacks /assets/manifest
       let existingMap = {};
+      let serverFolderPath = "";
       try {
         const manifestRes = await api("/assets/manifest", {
           signal: controller.signal,
           headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
         });
         existingMap = manifestRes?.files || {};
+        serverFolderPath = manifestRes?.folder_path || "";
       } catch (manifestErr) {
         if (manifestErr?.name === "AbortError" || controller.signal.aborted) throw manifestErr;
         if (manifestErr?.status !== 404) throw manifestErr;
@@ -185,12 +216,13 @@ export function UploadProvider({ children }) {
           skippedFiles: skippedCount,
           message: `All ${skippedCount} clips verified — refreshing index…`,
         });
-        const scan = await api("/assets/rescan", {
-          method: "POST",
+        const scan = await rescanVaultWithFallback({
+          workspaceId,
+          preference,
           signal: controller.signal,
-          headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
-          body: JSON.stringify({ preference }),
+          fallbackFolderPath: serverFolderPath,
         });
+        const totalIndexed = typeof scan?.total_assets === "number" ? scan.total_assets : skippedCount;
         setVaultVersion((v) => v + 1);
         setVaultJob({
           id: startedAt,
@@ -204,7 +236,7 @@ export function UploadProvider({ children }) {
           loadedBytes: 0,
           speedBps: 0,
           startedAt,
-          message: `All ${skippedCount.toLocaleString()} clips already up to date (${scan.total_assets.toLocaleString()} total indexed).`,
+          message: `All ${skippedCount.toLocaleString()} clips already up to date (${totalIndexed.toLocaleString()} total indexed).`,
         });
         return;
       }
@@ -364,6 +396,7 @@ export function UploadProvider({ children }) {
             uploadedFilesCount += res?.saved ?? batch.length;
             skippedOnServer += res?.skipped ?? 0;
           }
+          if (res?.folder_path) serverFolderPath = res.folder_path;
           updateProgress(true);
         }
       };
@@ -377,19 +410,15 @@ export function UploadProvider({ children }) {
         loadedBytes: totalUploadBytes,
         message: "Finalizing library index…",
       });
-      let totalIndexedCount = uploadedFilesCount + skippedCount + skippedOnServer;
-      try {
-        const scan = await api("/assets/rescan", {
-          method: "POST",
-          headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
-          body: JSON.stringify({ preference }),
-        });
-        if (typeof scan?.total_assets === "number") {
-          totalIndexedCount = scan.total_assets;
-        }
-      } catch (rescanErr) {
-        if (rescanErr?.status !== 404) throw rescanErr;
-      }
+      const scan = await rescanVaultWithFallback({
+        workspaceId,
+        preference,
+        fallbackFolderPath: serverFolderPath,
+      });
+      const totalIndexedCount =
+        typeof scan?.total_assets === "number"
+          ? scan.total_assets
+          : uploadedFilesCount + skippedCount + skippedOnServer;
       setVaultVersion((v) => v + 1);
       setVaultJob({
         id: startedAt,
@@ -409,10 +438,10 @@ export function UploadProvider({ children }) {
       const isCancelled = err?.name === "AbortError" || controller.signal.aborted;
       if (isCancelled || uploadedFilesCount > 0) {
         try {
-          await api("/assets/rescan", {
-            method: "POST",
-            headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
-            body: JSON.stringify({ preference }),
+          await rescanVaultWithFallback({
+            workspaceId,
+            preference,
+            fallbackFolderPath: serverFolderPath,
           });
           setVaultVersion((v) => v + 1);
         } catch {}
@@ -584,20 +613,25 @@ export function UploadProvider({ children }) {
     try {
       const existingIndices = new Set();
       const CHECK_CHUNK = 1000;
-      for (let offset = 0; offset < valid.length; offset += CHECK_CHUNK) {
-        if (controller.signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
-        const slice = valid.slice(offset, offset + CHECK_CHUNK);
-        const res = await api(`/library/collections/${collectionId}/check-existing`, {
-          method: "POST",
-          signal: controller.signal,
-          headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
-          body: JSON.stringify({
-            items: slice.map((f) => ({ name: f.name, size: f.size || 0 })),
-          }),
-        });
-        for (const relIdx of res.existing_indices || []) {
-          existingIndices.add(offset + relIdx);
+      try {
+        for (let offset = 0; offset < valid.length; offset += CHECK_CHUNK) {
+          if (controller.signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+          const slice = valid.slice(offset, offset + CHECK_CHUNK);
+          const res = await api(`/library/collections/${collectionId}/check-existing`, {
+            method: "POST",
+            signal: controller.signal,
+            headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
+            body: JSON.stringify({
+              items: slice.map((f) => ({ name: f.name, size: f.size || 0 })),
+            }),
+          });
+          for (const relIdx of res.existing_indices || []) {
+            existingIndices.add(offset + relIdx);
+          }
         }
+      } catch (checkErr) {
+        if (checkErr?.name === "AbortError" || controller.signal.aborted) throw checkErr;
+        if (checkErr?.status !== 404) throw checkErr;
       }
 
       const toUpload = valid.filter((_, idx) => !existingIndices.has(idx));
