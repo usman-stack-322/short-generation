@@ -44,8 +44,12 @@ def configured(provider):
 
 
 def local_voices():
-    response=subprocess.run([sys.executable,'-m','app.tts.local_worker','--list'],capture_output=True,
-                            text=True,encoding='utf-8',check=True,timeout=20)
+    from pathlib import Path
+    response=subprocess.run(
+        [sys.executable,'-m','app.tts.local_worker','--list'],
+        cwd=str(Path(__file__).resolve().parents[2]),
+        capture_output=True,text=True,encoding='utf-8',check=True,timeout=20,
+    )
     return json.loads(response.stdout)
 
 

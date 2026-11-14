@@ -81,6 +81,36 @@ def edit_collection(collection_id:str,payload:CollectionInput,context=Depends(re
     return {'id':row.id,'name':row.name,'channel_id':row.channel_id,'member_id':row.member_id}
 
 
+class CheckExistingMediaItem(BaseModel):
+    name:str=Field(min_length=1,max_length=300)
+    size:int=Field(default=0,ge=0)
+
+
+class CheckExistingMediaInput(BaseModel):
+    items:list[CheckExistingMediaItem]=Field(default_factory=list,max_length=2000)
+
+
+@router.post('/collections/{collection_id}/check-existing')
+def check_existing_media(collection_id:str,payload:CheckExistingMediaInput,context=Depends(require_editor),db:Session=Depends(get_db)):
+    collection_access(db,collection_id,context[1],True)
+    rows=db.query(LibraryMedia).filter_by(collection_id=collection_id,archived=False).all()
+    by_name:dict[str,list[int]]={}
+    for r in rows:
+        p=Path(r.local_path)
+        if p.is_file():
+            sz=p.stat().st_size
+            by_name.setdefault(r.name,[]).append(sz)
+            by_name.setdefault(Path(r.name).stem,[]).append(sz)
+    existing_indices=[]
+    for idx,item in enumerate(payload.items):
+        stem=Path(item.name).stem[:160]
+        fname=item.name[:160]
+        sizes=by_name.get(fname) or by_name.get(stem) or []
+        if sizes and (item.size<=0 or item.size in sizes):
+            existing_indices.append(idx)
+    return {'existing_indices':existing_indices,'existing_count':len(existing_indices)}
+
+
 @router.get('/collections/{collection_id}/media')
 def media_list(collection_id:str,q:str='',media_type:str='',approved:bool|None=None,context=Depends(current_context),db:Session=Depends(get_db)):
     collection_access(db,collection_id,context[1])

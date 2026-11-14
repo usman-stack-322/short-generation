@@ -184,19 +184,29 @@ class PixabayAssetProvider:
 BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 
+_WEB_STOCK_NOISE = (
+    'gettyimages', 'getty', 'alamy', 'shutterstock', 'istockphoto', 'istock',
+    'dreamstime', 'depositphotos', '123rf', 'vecteezy', 'adobestock', 'stock.adobe',
+    'bigstock', 'canstock', 'pond5', 'envato', 'freepik', 'megapixl', 'colourbox',
+    'agefotostock', 'superstock', 'corbis', 'wireimage', 'filmmagic', 'imago',
+    'bridgeman', 'watermark', 'watermarked', 'stockphoto', 'poster', 'flyer', 'meme',
+    'infographic',
+)
+
+
 class OpenverseAssetProvider:
     def search(self, query):
         from app.services.assets.wikimedia import extract_core_keywords
         clean_q = re.sub(r'\s+(?:archival\s+|modern\s+|historical\s+)?(?:photo(?:graph)?|image)\s*$', '', query, flags=re.I).strip()
         candidates = []
-        for c in [extract_core_keywords(clean_q, max_words=3), extract_core_keywords(clean_q, max_words=2), clean_q]:
+        for c in [clean_q, extract_core_keywords(clean_q, max_words=3), extract_core_keywords(clean_q, max_words=2)]:
             if c and c not in candidates:
                 candidates.append(c)
         for q in candidates:
             try:
                 response = httpx.get(
                     'https://api.openverse.org/v1/images/',
-                    params={'q': q, 'page_size': 10},
+                    params={'q': q, 'page_size': 12, 'category': 'photograph', 'mature': 'false'},
                     headers={'User-Agent': BROWSER_USER_AGENT, 'Accept': 'application/json'},
                     timeout=15,
                     follow_redirects=True,
@@ -213,8 +223,18 @@ class OpenverseAssetProvider:
                     lic = (row.get('license') or 'cc0').upper()
                     lic_ver = row.get('license_version') or '1.0'
                     title = row.get('title') or q
+                    tags_text = ' '.join(
+                        t.get('name', '') for t in (row.get('tags') or []) if isinstance(t, dict) and t.get('name')
+                    ).strip()
+                    landing = row.get('foreign_landing_url') or row.get('detail_url') or ''
+                    creator = row.get('creator') or 'Openverse Contributor'
+                    raw_blob = f"{title} {tags_text} {creator} {row.get('source', '')} {landing} {row.get('url', '')}".lower()
+                    if any(term in raw_blob for term in _WEB_STOCK_NOISE):
+                        continue
                     for dl in [row.get('url'), row.get('thumbnail')]:
                         if not dl or not dl.startswith('https://'):
+                            continue
+                        if any(term in dl.lower() for term in _WEB_STOCK_NOISE):
                             continue
                         results.append({
                             'source': 'openverse',
@@ -224,7 +244,8 @@ class OpenverseAssetProvider:
                             'license': f'CC {lic} {lic_ver}',
                             'license_url': row.get('license_url') or 'https://creativecommons.org/licenses/',
                             'title': title,
-                            'description': f'Photograph of {title} ({query})',
+                            'tags': tags_text,
+                            'description': f'Photograph of {title}' + (f' ({tags_text})' if tags_text else ''),
                             'width': w or 1080,
                             'height': h or 1920,
                         })

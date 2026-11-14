@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from app.core.config import settings
 from app.database.seed import bootstrap_initial_owner, seed_demo_data
 from app.database.session import Base, engine, SessionLocal
@@ -72,6 +73,7 @@ async def duplicate_update(request,exc):
     return JSONResponse(status_code=409,content={'detail':'This operation already exists or conflicts with a concurrent change. Refresh before retrying.'})
 _extra_origins = [o.strip().rstrip("/") for o in getattr(settings, "cors_origins", "").split(",") if o.strip()]
 _allowed_origins = list({settings.frontend_origin.rstrip("/"), "http://127.0.0.1:5173", "http://localhost:5173", *_extra_origins})
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,

@@ -927,3 +927,171 @@ html[data-theme="dark"] .studio-card {
   .studio-kpi-grid { grid-template-columns: 1fr 1fr; }
   .studio-hero { padding: 16px; }
 }
+
+/* === Global Persistent Background Upload Dock === */
+.global-upload-dock {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: min(370px, calc(100vw - 32px));
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 14px;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.18);
+  z-index: 950;
+  overflow: hidden;
+}
+.global-upload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line, #e2e8f0);
+  background: var(--surface-alt, #f8fafc);
+  font-size: 13px;
+  color: var(--text, #0f172a);
+}
+.global-upload-dock.minimized .global-upload-head {
+  border-bottom: 0;
+}
+.global-upload-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.global-upload-item {
+  display: grid;
+  gap: 6px;
+}
+.global-upload-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.global-upload-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text, #0f172a);
+}
+.global-upload-action {
+  background: transparent;
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 7px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #dc2626;
+  cursor: pointer;
+}
+.global-upload-bar {
+  height: 7px;
+  border-radius: 999px;
+  background: var(--surface-alt, #e2e8f0);
+  overflow: hidden;
+}
+.global-upload-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  transition: width 0.2s ease;
+}
+.global-upload-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #64748b);
+}
+.global-upload-msg {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-muted, #64748b);
+}
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.spin {
+  animation: spin-slow 0.9s linear infinite;
+}
+
+/* === Auth Sign-In / Create Account Switcher === */
+.auth-mode-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 18px;
+  border-radius: 12px;
+  background: var(--surface-alt, #f1f5f9);
+  border: 1px solid var(--line, #e2e8f0);
+}
+.auth-mode-tabs button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted, #64748b);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.auth-mode-tabs button.active {
+  background: var(--surface, #ffffff);
+  color: var(--text, #0f172a);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+}
+
+/* === Saved Folder Bar & Live Clip Checker === */
+.vault-saved-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 11px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  color: var(--text, #0f172a);
+}
+.vault-live-progress {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: rgba(99, 102, 241, 0.07);
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  color: var(--text, #0f172a);
+  font-variant-numeric: tabular-nums;
+}
+.vault-live-progress.done {
+  background: rgba(22, 163, 74, 0.08);
+  border-color: rgba(22, 163, 74, 0.28);
+}
+.vault-live-progress.error,
+.vault-live-progress.cancelled {
+  background: rgba(220, 38, 38, 0.07);
+  border-color: rgba(220, 38, 38, 0.28);
+}
+.vault-live-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.vault-live-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  min-width: 0;
+}

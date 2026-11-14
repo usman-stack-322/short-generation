@@ -119,6 +119,69 @@ def media_metadata(url):
     return {'url':'https://www.youtube.com/watch?v='+id,'title':meta.get('title',''),'creator':meta.get('author_name',''),'creator_url':meta.get('author_url',''),
         'kind':'video_metadata','transcript_status':'unavailable: no owner-authorized captions or publisher transcript supplied','evidence_eligible':False,'excerpt':''}
 
+def _extract_json_value(text,marker):
+    idx=text.find(marker)
+    if idx==-1:return None
+    pos=idx+len(marker)
+    while pos<len(text) and text[pos].isspace():pos+=1
+    if pos>=len(text):return None
+    try:
+        val,_=json.JSONDecoder().raw_decode(text[pos:])
+        return val
+    except Exception:return None
+
+def _parse_caption_payload(body):
+    if not body:return ''
+    stripped=body.lstrip()
+    if stripped.startswith('{'):
+        try:
+            payload=json.loads(stripped)
+            parts=[]
+            for ev in payload.get('events') or []:
+                for seg in ev.get('segs') or []:
+                    u=seg.get('utf8') or ''
+                    if u and u!='\n':parts.append(html.unescape(u))
+            return re.sub(r'\s+',' ',' '.join(parts)).strip()
+        except Exception:return ''
+    try:
+        import xml.etree.ElementTree as ET
+        root=ET.fromstring(body)
+        lines=[html.unescape(''.join(el.itertext())) for el in list(root.iter('text'))+list(root.iter('p'))]
+        return re.sub(r'\s+',' ',' '.join(l for l in lines if l and l.strip())).strip()
+    except Exception:return ''
+
+def _fetch_caption_tracks(tracks,headers,cookies=None):
+    if not isinstance(tracks,list):return ''
+    def _rank(t):
+        lang=(t.get('languageCode') or '').lower()
+        is_en=0 if lang.startswith('en') else 1
+        is_asr=1 if t.get('kind')=='asr' else 0
+        return (is_en,is_asr)
+    best_text=''
+    for t in sorted(tracks,key=_rank):
+        b_url=t.get('baseUrl')
+        if not b_url:continue
+        candidates=[b_url+('&fmt=json3' if 'fmt=' not in b_url else ''),b_url]
+        for cu in dict.fromkeys(candidates):
+            try:
+                sub=httpx.get(cu,headers=headers,cookies=cookies,timeout=12,follow_redirects=True)
+                if sub.status_code==200:
+                    text=_parse_caption_payload(sub.text)
+                    if len(text.split())>len(best_text.split()):best_text=text
+                    if len(best_text.split())>=40:return best_text
+            except Exception:pass
+    return best_text
+
+def _clean_youtube_desc(desc):
+    lines=[]
+    for raw in (desc or '').splitlines():
+        line=raw.strip()
+        if not line:continue
+        low=line.lower()
+        if any(p in low for p in ('http://','https://','subscribe','follow us','follow me','use code','promo code','cashapp','venmo','patreon','merch','business inquiries')):continue
+        lines.append(re.sub(r'https?://\S+','',line).strip())
+    return re.sub(r'\s+',' ',' '.join(lines)).strip()
+
 def read_youtube(url,is_user=False):
     yid=youtube_id(url)
     if not yid:return None,None
@@ -133,47 +196,46 @@ def read_youtube(url,is_user=False):
     creator_url=meta.get('author_url') or ''
     transcript=''
     desc=''
-    headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36','Accept-Language':'en-US,en;q=0.9'}
+    cookies={'CONSENT':'YES+cb.20210328-17-p0.en+FX+999','SOCS':'CAI'}
     try:
-        res=httpx.get(watch_url,headers=headers,timeout=15,follow_redirects=True)
+        res=httpx.get(watch_url,headers=headers,cookies=cookies,timeout=15,follow_redirects=True)
         if res.status_code==200:
             page_text=res.text
             if not title:
                 t_m=re.search(r'<title>(.*?)</title>',page_text)
                 if t_m:title=html.unescape(t_m.group(1).removesuffix(' - YouTube'))
-            c_idx=page_text.find('"captionTracks":')
-            if c_idx!=-1:
-                b_start=page_text.find('[',c_idx);b_end=page_text.find(']',b_start)
-                if b_start!=-1 and b_end!=-1:
-                    try:
-                        tracks=json.loads(page_text[b_start:b_end+1])
-                        for t in tracks:
-                            b_url=t.get('baseUrl')
-                            if b_url:
-                                sub=httpx.get(b_url,headers=headers,timeout=12)
-                                if sub.status_code==200:
-                                    import xml.etree.ElementTree as ET
-                                    root=ET.fromstring(sub.text)
-                                    lines=[html.unescape(elem.text or '') for elem in root.iter('text') if elem.text]
-                                    transcript=' '.join(lines)
-                                    if len(transcript.split())>=40:break
-                    except Exception:pass
-            d_idx=page_text.find('"shortDescription":"')
-            if d_idx!=-1:
-                d_start=d_idx+len('"shortDescription":"');d_end=page_text.find('"',d_start)
-                if d_end!=-1:
-                    raw_d=page_text[d_start:d_end]
-                    try:desc=raw_d.encode('utf-8').decode('unicode_escape',errors='ignore')
-                    except Exception:desc=raw_d
+            tracks=_extract_json_value(page_text,'"captionTracks":')
+            if isinstance(tracks,list):transcript=_fetch_caption_tracks(tracks,headers,cookies)
+            raw_d=_extract_json_value(page_text,'"shortDescription":')
+            if isinstance(raw_d,str):desc=raw_d
     except Exception:pass
-    excerpt=transcript if len(transcript.split())>=50 else (transcript+'\n\n'+desc).strip()
-    if not excerpt and title:
-        excerpt=f"{title}. Video overview and research report by {creator or 'creator'}."
-    if not excerpt or (len(excerpt.split())<20 and not is_user):
+    if len(transcript.split())<40:
+        try:
+            inn=httpx.post(
+                'https://www.youtube.com/youtubei/v1/player?prettyPrint=false',
+                json={'context':{'client':{'clientName':'ANDROID','clientVersion':'20.10.38','hl':'en','gl':'US'}},'videoId':yid},
+                headers={'Content-Type':'application/json','User-Agent':'com.google.android.youtube/20.10.38 (Linux; U; Android 14)'},
+                timeout=12,
+            )
+            if inn.status_code==200:
+                pdata=inn.json()
+                vd=pdata.get('videoDetails') or {}
+                if not title and vd.get('title'):title=vd['title']
+                if not creator and vd.get('author'):creator=vd['author']
+                if not desc and vd.get('shortDescription'):desc=vd['shortDescription']
+                tracks=((pdata.get('captions') or {}).get('playerCaptionsTracklistRenderer') or {}).get('captionTracks')
+                if isinstance(tracks,list):
+                    cand=_fetch_caption_tracks(tracks,headers,cookies)
+                    if len(cand.split())>len(transcript.split()):transcript=cand
+        except Exception:pass
+    clean_desc=_clean_youtube_desc(desc)
+    excerpt=transcript if len(transcript.split())>=20 else ('\n\n'.join(p for p in (title,clean_desc) if p) if len(clean_desc.split())>=20 else '')
+    if not excerpt or len(excerpt.split())<20:
         item={'url':watch_url,'title':title or 'YouTube Video','creator':creator,'creator_url':creator_url,
               'kind':'video_metadata','transcript_status':'unavailable: no owner-authorized captions or publisher transcript supplied','evidence_eligible':False,'excerpt':''}
         return None,item
-    has_transcript=bool(transcript and len(transcript.split())>=40)
+    has_transcript=bool(transcript and len(transcript.split())>=20)
     source={
         'url':watch_url,'title':title or 'YouTube Video','excerpt':excerpt[:18000],
         'retrieved_sha256':hashlib.sha256(excerpt.encode('utf8')).hexdigest(),
@@ -291,9 +353,59 @@ def read_podcast(url,body,trusted):
         source['publisher_group']=publisher_group(source);return source
     raise ValueError('Podcast metadata accessible, but no readable trusted publisher transcript is available; speech unverified')
 
-def collect(analysis,source_urls,diag,trusted,lead,progress=None,style='educational'):
-    rows=[{'url':u,'title':'Supplied source'} for u in source_urls]+discover(analysis,lead,diag)
+def fetch_user_urls(source_urls,diag=None):
+    """Pre-read user-supplied URLs (e.g. YouTube transcript or trusted articles) before Analysis."""
+    diag=diag if diag is not None else []
+    sources=[];media=[];seen=set()
+    for url in (source_urls or []):
+        if url in seen:continue
+        seen.add(url)
+        try:
+            if youtube_id(url):
+                yt_source,yt_media=read_youtube(url,is_user=True)
+                if yt_media:media.append(yt_media)
+                if yt_source:
+                    yt_source['id']='S'+str(len(sources)+1)
+                    sources.append(yt_source)
+                    diag.append({'stage':'primary_media','url':url,'result':'readable','words':len(yt_source['excerpt'].split()),'publisher_group':yt_source['publisher_group']})
+                else:
+                    item=yt_media or media_metadata(url)
+                    if not yt_media:media.append(item)
+                    diag.append({'stage':'primary_media','url':url,'result':'metadata_only','reason':item['transcript_status']})
+                continue
+            source=read_source(url,lambda u:True)
+            source['id']='S'+str(len(sources)+1);source['origin']='user_url';sources.append(source)
+            diag.append({'stage':'article','url':url,'result':'readable','words':len(source['excerpt'].split()),'publisher_group':source['publisher_group']})
+        except Exception as exc:
+            diag.append({'stage':'article','url':url,'result':'fetch_failed','reason':safe_failure(exc)})
+    return sources,media,diag
+
+
+def collect(analysis,source_urls,diag,trusted,lead,progress=None,style='educational',prefetched_user=None):
     sources=[];media=[];seen=set();attempts=0
+    if prefetched_user is not None:
+        u_sources,u_media,u_diag=prefetched_user
+        for s in u_sources:
+            if s['url'] not in seen:
+                seen.add(s['url']);sc=dict(s);sc['id']='S'+str(len(sources)+1);sources.append(sc)
+        for m in u_media:
+            if not any(x.get('url')==m.get('url') for x in media):media.append(m)
+        diag.extend(u_diag)
+        if progress and sources:progress(sources,media)
+    elif source_urls:
+        u_sources,u_media,u_diag=fetch_user_urls(source_urls,diag=diag)
+        for s in u_sources:
+            seen.add(s['url']);s['id']='S'+str(len(sources)+1);sources.append(s)
+        media.extend(u_media)
+        if progress and sources:progress(sources,media)
+
+    user_eligible=[s for s in sources if s.get('evidence_eligible')]
+    user_rich=[s for s in user_eligible if len((s.get('excerpt') or '').split())>=50]
+    if source_urls and user_rich and group_sources(user_eligible)>=1:
+        return sources,media
+
+    for u in source_urls:seen.add(u)
+    rows=discover(analysis,lead,diag)
     for row in rows:
         url=row['url']
         if url in seen:continue
@@ -327,7 +439,7 @@ def collect(analysis,source_urls,diag,trusted,lead,progress=None,style='educatio
     # If sources are sparse for evergreen / storytelling topics, fetch Wikipedia references
     is_evergreen = bool(source_urls) or style in {'storytelling','documentary','evergreen'}
     if len(sources)<2 and is_evergreen:
-        topic_str=analysis.get('topic') or analysis.get('angle') or ' '.join(lead.get('people',[]))
+        topic_str=analysis.get('topic') or analysis.get('angle') or (media[0].get('title') if media else '') or ' '.join(lead.get('people',[]))
         if topic_str:
             wiki_sources=fetch_wikipedia_sources(topic_str,lead)
             for ws in wiki_sources:

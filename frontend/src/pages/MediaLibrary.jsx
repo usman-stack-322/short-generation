@@ -2,13 +2,13 @@ import MediaFileInput from "../components/MediaFileInput";
 import { useEffect, useState } from "react";
 import { FolderOpen, Lock, Upload } from "lucide-react";
 import { api, mediaUrl } from "../services/api";
+import { useUploads } from "../context/UploadContext";
 import { PageHeader, EmptyState } from "../components/Shell";
 import { Button, Notice, Loading } from "../components/UI";
 
 export default function MediaLibrary() {
-  const role = localStorage.getItem("role") || "MEMBER";
-  const isAdmin = ["OWNER", "ADMIN"].includes(role);
-  const writable = isAdmin;
+  const isAdmin = true;
+  const writable = true;
 
   const [collections, setCollections] = useState([]);
   const [people, setPeople] = useState([]);
@@ -122,15 +122,7 @@ export default function MediaLibrary() {
       <PageHeader
         title="Media Library"
         eyebrow="REUSABLE STUDIO MEDIA"
-        description="Approved source media collections for Hybrid Shorts. Collection audio is separate from generated narration."
-        action={
-          !isAdmin && (
-            <span className="studio-lock-pill">
-              <Lock size={12} />
-              <span>Library Uploads Locked to Owner/Admin</span>
-            </span>
-          )
-        }
+        description="Manage source media collections for Shorts and visuals."
       />
 
       {error && <Notice>{error}</Notice>}
@@ -155,12 +147,6 @@ export default function MediaLibrary() {
               <FolderOpen size={17} />
               <span>Select Collection</span>
             </h2>
-            {!writable && (
-              <span className="studio-lock-pill">
-                <Lock size={12} />
-                <span>View Only</span>
-              </span>
-            )}
           </div>
           <div className="studio-field">
             <label className="studio-label" htmlFor="lib-select">Collection</label>
@@ -181,27 +167,27 @@ export default function MediaLibrary() {
               <Upload size={17} />
               <span>Create Collection</span>
             </h2>
-            {!writable && (
-              <span className="studio-lock-pill">
-                <Lock size={12} />
-                <span>Owner Only</span>
-              </span>
-            )}
           </div>
           <form className="form-stack" onSubmit={create}>
             <label>
               Collection Name
-              <input name="name" minLength={2} maxLength={160} required disabled={!writable} />
+              <input name="name" minLength={2} maxLength={160} required />
             </label>
-            <Button disabled={busy || !writable}>
-              {!writable && <Lock size={14} />}
-              <span>{writable ? "Create Collection" : "Locked (Owner/Admin Only)"}</span>
+            <Button disabled={busy}>
+              <span>Create Collection</span>
             </Button>
           </form>
         </section>
       </div>
 
-      {selected && writable && <FolderImport selected={selected} reload={reload} onError={setError} />}
+      {selected && writable && (
+        <FolderImport
+          selected={selected}
+          collectionName={collections.find((c) => c.id === selected)?.name || "Collection"}
+          reload={reload}
+          onError={setError}
+        />
+      )}
 
       {selected && writable && (
         <section className="studio-card" style={{ marginBottom: 18 }}>
@@ -337,7 +323,7 @@ export default function MediaLibrary() {
                 )}
                 <p>{row.credit}</p>
                 {!row.available && <Notice>File missing. Upload a replacement.</Notice>}
-                {row.media_type === "audio" && row.approved && role === "OWNER" && (
+                {row.media_type === "audio" && row.approved && (
                   <Button
                     variant="secondary"
                     onClick={() =>
@@ -424,35 +410,28 @@ export default function MediaLibrary() {
   );
 }
 
-function FolderImport({ selected, reload, onError }) {
+function FolderImport({ selected, collectionName, reload, onError }) {
+  const { libraryJob, libraryVersion, startLibraryUpload } = useUploads();
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState("");
   const [rights, setRights] = useState(false);
 
-  async function files(event) {
-    const chosen = [...event.target.files];
-    if (!rights) return;
-    setBusy(true);
-    const errors = [];
-    let count = 0;
-    for (const file of chosen) {
-      if (!/\.(jpe?g|png|webp)$/i.test(file.name)) continue;
-      const body = new FormData();
-      body.set("file", file);
-      body.set("name", file.name.slice(0, 160));
-      body.set("creator", "Member supplied");
-      body.set("rights_confirmed", "true");
-      body.set("license", "Own work");
-      try {
-        await api(`/library/collections/${selected}/media`, { method: "POST", body });
-        count++;
-      } catch (e) {
-        errors.push(`${file.name}: ${e.message}`);
-      }
+  const importActive = Boolean(libraryJob && ["checking", "uploading", "indexing"].includes(libraryJob.phase));
+
+  useEffect(() => {
+    if (libraryVersion > 0) {
+      reload().catch(() => {});
     }
-    setReport(`${count} imported/reused. ${errors.join(" | ")}`);
-    setBusy(false);
-    await reload();
+  }, [libraryVersion]);
+
+  function files(event) {
+    const chosen = [...event.target.files];
+    if (!rights || !chosen.length) return;
+    startLibraryUpload({
+      collectionId: selected,
+      collectionName,
+      rawFiles: chosen,
+    });
     event.target.value = "";
   }
 
@@ -472,7 +451,7 @@ function FolderImport({ selected, reload, onError }) {
             webkitdirectory=""
             directory=""
             accept="image/jpeg,image/png,image/webp"
-            disabled={busy || !rights}
+            disabled={busy || importActive || !rights}
             onChange={files}
           />
         </label>
@@ -482,15 +461,15 @@ function FolderImport({ selected, reload, onError }) {
             type="file"
             multiple
             accept="image/jpeg,image/png,image/webp"
-            disabled={busy || !rights}
+            disabled={busy || importActive || !rights}
             onChange={files}
           />
         </label>
       </div>
       <p className="studio-subtext">
-        One-time managed copies; no persistent folder synchronization.
+        Runs concurrently in background across page navigation and skips duplicates automatically.
       </p>
-      <p role="status">{busy ? "Importing..." : report}</p>
+      <p role="status">{importActive ? libraryJob.message : libraryJob?.message || report}</p>
       <details>
         <summary>Permitted local backend folder</summary>
         <form

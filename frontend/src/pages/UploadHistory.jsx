@@ -1,13 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Download, Film, Lock } from "lucide-react";
+import { Download, Film } from "lucide-react";
 import { api, mediaUrl } from "../services/api";
 import { PageHeader } from "../components/Shell";
 import { Button, Loading, Notice } from "../components/UI";
 
 export default function UploadHistory() {
-  const role = localStorage.getItem("role") || "MEMBER";
-  const isAdmin = ["OWNER", "ADMIN"].includes(role);
   const [shortUploads, setShortUploads] = useState(null);
   const [error, setError] = useState("");
   const [banner, setBanner] = useState("");
@@ -16,7 +14,7 @@ export default function UploadHistory() {
     api("/title-shorts")
       .then((shorts) => {
         const exported = (shorts || []).filter(
-          (s) => s.review_status === "approved" || s.review_status === "uploaded"
+          (s) => Boolean(s.video_url) || s.status === "ready"
         );
         setShortUploads(exported);
       })
@@ -31,17 +29,14 @@ export default function UploadHistory() {
       <PageHeader
         eyebrow="MANUAL MP4 EXPORTS"
         title="Export History"
-        description="Download approved 9:16 MP4 Shorts and copy titles & scripts for manual publishing."
+        description="Download your rendered 9:16 MP4 Shorts and copy titles & scripts for manual publishing."
         action={
           <div className="studio-action-row">
-            {!isAdmin && (
-              <span className="studio-lock-pill">
-                <Lock size={12} />
-                <span>Approval Required Before Download</span>
-              </span>
-            )}
-            <Link to="/review-queue">
-              <Button variant="secondary">Open Review Queue</Button>
+            <Link to="/videos">
+              <Button variant="secondary">All Videos</Button>
+            </Link>
+            <Link to="/title-to-short">
+              <Button>Create Short</Button>
             </Link>
           </div>
         }
@@ -56,12 +51,12 @@ export default function UploadHistory() {
             <div className="empty-icon">
               <Download size={20} />
             </div>
-            <strong>No approved exports yet</strong>
+            <strong>No rendered MP4 exports yet</strong>
             <p>
-              Once a rendered Short is approved in the Review Queue, its MP4 download unlocks here automatically.
+              Render any Short in the Create Short studio to download the final 9:16 MP4 file here.
             </p>
-            <Link to="/review-queue">
-              <Button>Go to Review Queue</Button>
+            <Link to="/title-to-short">
+              <Button>Create a Short</Button>
             </Link>
           </div>
         </section>
@@ -70,7 +65,7 @@ export default function UploadHistory() {
           <div className="studio-card-head">
             <h2>
               <Film size={17} />
-              <span>Approved Exports ({shortUploads.length})</span>
+              <span>Rendered Exports ({shortUploads.length})</span>
             </h2>
           </div>
 
@@ -79,7 +74,7 @@ export default function UploadHistory() {
               <thead>
                 <tr>
                   <th>Short Title</th>
-                  <th>Creator</th>
+                  <th>Language</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
@@ -92,10 +87,10 @@ export default function UploadHistory() {
                         {item.title}
                       </Link>
                     </td>
-                    <td>{item.creator_name || "Title to Short"}</td>
+                    <td>{item.language || "English"}</td>
                     <td>
-                      <span className={`studio-badge ${item.review_status || "approved"}`}>
-                        Approved for Download
+                      <span className="studio-badge approved">
+                        Ready for Download
                       </span>
                     </td>
                     <td>

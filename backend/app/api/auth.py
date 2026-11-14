@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.security import create_token, current_context, hash_password, verify_password
+from app.core.security import create_token, current_context, hash_password, new_id, verify_password
 from app.database.session import get_db
-from app.models import User, WorkspaceMember
-from app.schemas import ForgotPasswordInput, LoginInput, ResetPasswordInput
+from app.models import User, Workspace, WorkspaceMember
+from app.schemas import ForgotPasswordInput, LoginInput, RegisterInput, ResetPasswordInput
 from app.services.account_codes import can_issue, consume_code, delivery_mode, issue_code, send_code
 
 
@@ -45,6 +45,32 @@ def logout(request: Request, response: Response):
     return {'signed_out': True}
 
 
+def _auth_response(user: User, membership: WorkspaceMember) -> dict:
+    return {
+        "access_token": create_token(user.id),
+        "token_type": "bearer",
+        "user": {"id": user.id, "name": user.name, "email": user.email},
+        "role": membership.role,
+        "workspace_id": membership.workspace_id,
+    }
+
+
+@router.post("/api/auth/register", status_code=201)
+def register(payload: RegisterInput, db: Session = Depends(get_db)):
+    email = payload.email.lower()
+    if db.query(User).filter_by(email=email).first():
+        raise HTTPException(status_code=409, detail="An account with this email already exists. Please sign in.")
+    display = payload.name.strip() or "Studio Creator"
+    workspace = Workspace(id=new_id(), name=f"{display}'s Studio")
+    user = User(id=new_id(), name=display, email=email, password_hash=hash_password(payload.password))
+    db.add_all([workspace, user])
+    db.flush()
+    membership = WorkspaceMember(id=new_id(), workspace_id=workspace.id, user_id=user.id, role="OWNER", active=True)
+    db.add(membership)
+    db.commit()
+    return _auth_response(user, membership)
+
+
 @router.post("/api/auth/login")
 def login(payload: LoginInput, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(email=payload.email.lower()).first()
@@ -53,11 +79,7 @@ def login(payload: LoginInput, db: Session = Depends(get_db)):
     membership = db.query(WorkspaceMember).filter_by(user_id=user.id, active=True).first()
     if not membership:
         raise HTTPException(status_code=403, detail="This account has no active workspace membership.")
-    return {
-        "access_token": create_token(user.id), "token_type": "bearer",
-        "user": {"id": user.id, "name": user.name, "email": user.email},
-        "role": membership.role, "workspace_id": membership.workspace_id,
-    }
+    return _auth_response(user, membership)
 
 
 @router.post("/api/auth/forgot-password")

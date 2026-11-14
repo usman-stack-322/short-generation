@@ -8,6 +8,13 @@ export function mediaUrl(path) {
   return path ? `${API_ROOT}${path}` : "";
 }
 
+function formatApiError(body, status) {
+  const detail = Array.isArray(body?.detail)
+    ? body.detail.map((item) => `${item.loc?.slice(1).join(".")}: ${item.msg}`).join("; ")
+    : body?.detail;
+  return detail || `Request failed (${status})`;
+}
+
 export async function api(path, options = {}) {
   const token = localStorage.getItem("token");
   const workspaceId = localStorage.getItem("workspace_id");
@@ -30,8 +37,7 @@ export async function api(path, options = {}) {
     window.location.replace('/login');
   }
   if (!response.ok) {
-    const detail = Array.isArray(body.detail) ? body.detail.map((item) => `${item.loc?.slice(1).join(".")}: ${item.msg}`).join("; ") : body.detail;
-    throw new Error(detail || `Request failed (${response.status})`);
+    throw new Error(formatApiError(body, response.status));
   }
   if (token && path !== '/auth/media-session') {
     if (mediaSessionToken !== token) {
@@ -41,4 +47,61 @@ export async function api(path, options = {}) {
     await mediaSessionPromise;
   }
   return body;
+}
+
+export function apiUpload(path, formData, { workspaceId, signal, onProgress } = {}) {
+  return new Promise((resolve, reject) => {
+    const token = localStorage.getItem("token");
+    const ws = workspaceId !== undefined ? workspaceId : localStorage.getItem("workspace_id");
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_ROOT}/api${path}`, true);
+    xhr.withCredentials = true;
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    if (ws) xhr.setRequestHeader("X-Workspace-Id", ws);
+
+    const handleAbort = () => {
+      try { xhr.abort(); } catch {}
+    };
+    if (signal) {
+      if (signal.aborted) {
+        reject(new DOMException("Upload cancelled", "AbortError"));
+        return;
+      }
+      signal.addEventListener("abort", handleAbort, { once: true });
+    }
+
+    xhr.upload.onprogress = (evt) => {
+      if (onProgress) onProgress(evt.loaded || 0, evt.total || 0);
+    };
+
+    xhr.onload = () => {
+      if (signal) signal.removeEventListener("abort", handleAbort);
+      let body = {};
+      try { body = JSON.parse(xhr.responseText || "{}"); } catch {}
+      if (xhr.status === 401 && token) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("user");
+        localStorage.removeItem("role");
+        resetMediaSession();
+        window.location.replace("/login");
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body);
+      } else {
+        reject(new Error(formatApiError(body, xhr.status)));
+      }
+    };
+
+    xhr.onerror = () => {
+      if (signal) signal.removeEventListener("abort", handleAbort);
+      reject(new Error("Network error while uploading batch."));
+    };
+
+    xhr.onabort = () => {
+      if (signal) signal.removeEventListener("abort", handleAbort);
+      reject(new DOMException("Upload cancelled", "AbortError"));
+    };
+
+    xhr.send(formData);
+  });
 }

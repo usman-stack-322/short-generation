@@ -3,11 +3,11 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, mediaUrl } from '../services/api';
 import { PageHeader } from '../components/Shell';
 import { Button } from '../components/UI';
-import { Film, FolderOpen, Image as ImageIcon, Search, Trash2, Upload } from 'lucide-react';
+import { Copy, FileText, Film, FolderOpen, Image as ImageIcon, Search, Trash2, Upload } from 'lucide-react';
 import './TitleShort.css';
 
 const active = new Set(['analyzing','researching','research_verification','script','validating','visuals','voiceover','rendering']);
-const steps = [['analyzing','Analyze'],['researching','Research'],['script','Script review'],['visuals','Visuals'],['voiceover','Voiceover'],['rendering','Render']];
+const steps = [['analyzing','Topic check'],['researching','Web research'],['script','Script ready'],['visuals','Visuals'],['voiceover','Voiceover'],['rendering','Render']];
 
 export default function TitleShort() {
   const { id } = useParams();
@@ -22,10 +22,8 @@ export default function TitleShort() {
     caption_style:'viral_gold',
   });
   const narratorTouched = useRef(false);
-  const userRole = localStorage.getItem('role') || 'MEMBER';
-  const isAdmin = ['OWNER', 'ADMIN'].includes(userRole);
   const [collections,setCollections]=useState([]),[localMedia,setLocalMedia]=useState([]);
-  const [reviewBusy,setReviewBusy]=useState(false),[reviewNotice,setReviewNotice]=useState('');
+  const [reviewNotice,setReviewNotice]=useState('');
   useEffect(()=>{
     api('/library/collections').then(c=>setCollections(c)).catch(e=>setError(e.message));
   },[]);
@@ -42,8 +40,6 @@ export default function TitleShort() {
   const [vaultSearch,setVaultSearch] = useState('');
   useEffect(()=>{api('/assets/library').then(setVaultLibrary).catch(()=>{});},[id]);
   const [dirty,setDirty] = useState(false);
-  const [scopeConsent,setScopeConsent] = useState(false);
-  useEffect(()=>setScopeConsent(false),[draft?.revision]);
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState('');
   useEffect(()=>{
@@ -112,6 +108,33 @@ export default function TitleShort() {
       const row = await api('/projects/'+id+'/scenes/'+sceneNumber+'/upload-media', { method: 'POST', body: fd });
       setDirty(false); setDraft(row); setVaultPickerScene(null);
     } catch(e) { setError(e.message); } finally { setBusy(false); }
+  }
+
+  async function renderShort() {
+    if (!draft) return;
+    setBusy(true);
+    setError('');
+    setReviewNotice('');
+    try {
+      let current = draft;
+      if (current.scope?.required && !current.scope_accepted) {
+        current = await api('/title-shorts/' + id + '/scope/accept', {
+          method: 'POST',
+          body: JSON.stringify({ revision: current.revision }),
+        });
+        setDraft(current);
+      }
+      const rendered = await api('/title-shorts/' + id + '/render', {
+        method: 'POST',
+        body: JSON.stringify({ revision: current.revision }),
+      });
+      setDirty(false);
+      setDraft(rendered);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function create(event){
@@ -236,45 +259,8 @@ export default function TitleShort() {
     );
   };
 
-  async function submitForReview() {
-    if (!id) return;
-    setReviewBusy(true);
-    setError('');
-    setReviewNotice('');
-    try {
-      await api('/projects/' + id + '/submit-review', { method: 'POST' });
-      const row = await api('/title-shorts/' + id);
-      setDraft(row);
-      setReviewNotice('Submitted for workspace owner approval. Download unlocks once approved.');
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setReviewBusy(false);
-    }
-  }
-
-  async function approveDraft() {
-    if (!id) return;
-    setReviewBusy(true);
-    setError('');
-    setReviewNotice('');
-    try {
-      await api('/projects/' + id + '/review', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'approve', note: 'Approved from Title to Short editor' }),
-      });
-      const row = await api('/title-shorts/' + id);
-      setDraft(row);
-      setReviewNotice('Short approved! Final MP4 download is now unlocked for the creator.');
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setReviewBusy(false);
-    }
-  }
-
-  const canDownload = isAdmin || ['approved', 'uploaded'].includes(draft?.review_status);
-  const canRemoveDraft = (row) => !!row && !active.has(row.status) && (isAdmin || ['draft', 'rejected'].includes(row.review_status || 'draft'));
+  const canDownload = Boolean(draft?.video_url);
+  const canRemoveDraft = (row) => !!row && !active.has(row.status);
 
   async function removeDraft(targetId, title, navigateHome = false) {
     if (!window.confirm(`Remove draft "${title || 'this draft'}" permanently?`)) return;
@@ -303,7 +289,7 @@ export default function TitleShort() {
       <PageHeader
         eyebrow="AI CREATION"
         title="Title to AI Short"
-        description="One title. One compelling angle. Authentic celebrity clips and real photography you review before rendering."
+        description="Enter any title — AI researches verified sources, writes the full spoken script, and prepares 9:16 scenes."
         action={<Link className="button button-secondary" to="/title-to-short" onClick={()=>{request.current=null;}}>New short</Link>}
       />
       <div className="title-short-info">Vertical 9:16 • 30, 45 or 60 seconds • Local Celebrity Vault + Real Web Photos • Zero AI Images</div>
@@ -322,7 +308,7 @@ export default function TitleShort() {
             value={form.title}
             onChange={e=>setForm({...form,title:e.target.value})}
           />
-          <span className="vault-helper-text">A broad title becomes one focused question, fact or story rather than a compressed long video.</span>
+          <span className="vault-helper-text">AI automatically researches reliable sources and generates your complete focused Short script.</span>
         </div>
 
         <div className="studio-controls-grid">
@@ -393,20 +379,29 @@ export default function TitleShort() {
         </div>
 
         <div className="studio-field">
-          <label className="studio-label" htmlFor="source-urls">Optional Reliable Source URLs (one per line)</label>
+          <label className="studio-label" htmlFor="source-urls">Optional YouTube / Article Source URLs (one per line)</label>
           <textarea id="source-urls" rows={3} value={sourceText} onChange={e=>setSourceText(e.target.value)} placeholder="https://www.youtube.com/watch?v=..." />
-          <span className="vault-helper-text">At least two independently originating readable sources are verified automatically alongside optional URLs.</span>
+          <span className="vault-helper-text">Paste a YouTube or article URL to read its script/transcript first and turn it into a cohesive Short Story, matching named personalities with your local Celebrity Folder.</span>
         </div>
 
         {capabilities?.languages[form.language]?.available===false&&<div role="alert" className="notice notice-error">{capabilities.languages[form.language].message}</div>}
         <Button type="submit" disabled={!capabilities||capabilities.languages[form.language]?.available===false} loading={busy}>
-          Research and draft short
+          Research &amp; Generate Script
         </Button>
       </form>}
 
       {id&&!draft&&!error&&<p role="status">Loading draft…</p>}
 
-      {draft&&<>
+      {draft&&(() => {
+        const scriptLines = (texts.length ? texts : (draft.scenes || []).map((s) => s.narration))
+          .map((s) => String(s || '').trim())
+          .filter(Boolean);
+        const combinedScript = scriptLines.join('\n\n');
+        const scriptWords = combinedScript.split(/\s+/).filter(Boolean).length;
+        const wpsMap = { rapid: 2.45, fast: 2.35, normal: 2.25, measured: 2.05 };
+        const estWps = wpsMap[draft.voice_pace || 'normal'] || 2.25;
+        const scriptEstSec = Math.round(scriptWords / estWps);
+        return <>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap',marginTop:16}}>
           <h2 style={{margin:0}}>{draft.title}</h2>
           {canRemoveDraft(draft)&&(
@@ -415,35 +410,27 @@ export default function TitleShort() {
             </Button>
           )}
         </div>
-        {draft.scope?.required&&<section className="studio-card" style={{marginBottom:20}} aria-label="Revised scope review">
-          <h3 style={{marginTop:0}}>Revised scope — acceptance required</h3>
-          <p><b>Original input (preserved):</b> {draft.title}</p>
-          <p><b>Proposed video title:</b> {draft.scope.proposed_title}</p>
-          <p><b>Focused angle:</b> {draft.scope.focus}</p>
-          <h4>Omitted because evidence is insufficient</h4>
-          {draft.scope.omissions.map((o,i)=><p key={i}><b>{o.claim}</b> — {o.reason}</p>)}
-          <p>Only independently supported paraphrases are included. Missing transcripts do not block those paraphrases; exact spoken quotes are omitted.</p>
-          {draft.scope_accepted
-            ? <p role="status">Revised scope and current saved script accepted. Editing or new research requires acceptance again.</p>
-            : <>
-                <label className="title-short-scope-consent">
-                  <input type="checkbox" aria-label="Accept revised scope" checked={scopeConsent} disabled={running||dirty} onChange={e=>setScopeConsent(e.target.checked)} />
-                  <span>I accept the revised title, focused scope, omissions and current saved script.</span>
-                </label>
-                <div>
-                  <Button disabled={running||dirty||!scopeConsent||draft.status!=='script_review'} onClick={()=>action('/'+id+'/scope/accept',{revision:draft.revision})}>
-                    Accept revised scope and script
-                  </Button>
-                </div>
-              </>}
-        </section>}
 
         <p>{draft.duration}s target · {draft.language} · {draft.style} · Draft version {draft.revision}</p>
         <ol className="title-short-progress" aria-label="Generation progress">
           {steps.map(([key,label],index)=><li key={key} aria-current={key===stage?'step':undefined} className={key===stage?'current':stageIndex>index||draft.status==='ready'?'done':''}>{label}{key===stage&&running?'…':''}</li>)}
         </ol>
         <div role="status" className="title-short-info">
-          {draft.status==='script_review'?'Review scenes, swap celebrity photos/clips, and choose transitions below before rendering.':draft.status==='ready'?'Short ready for preview, review queue, and MP4 download.':draft.status==='failed'?'Generation stopped. Saved drafts and earlier renders are preserved.':draft.status.replaceAll('_',' ')}
+          {draft.status==='analyzing'
+            ? `Step 1/3: Understanding topic & preparing web research (${elapsedSec}s)…`
+            : ['researching','research_verification'].includes(draft.status)
+            ? `Step 2/3: Researching & verifying reliable sources (${elapsedSec}s)…`
+            : draft.status==='script'
+            ? `Step 3/3: Writing your full Short script (${elapsedSec}s)…`
+            : draft.status==='visuals' && !draft.video_url
+            ? `Matching Celebrity Vault & visual clips for your script (${elapsedSec}s)…`
+            : draft.status==='script_review'
+            ? 'Research complete — your full script and storyboard are ready below.'
+            : draft.status==='ready'
+            ? 'Short ready for preview and direct MP4 download.'
+            : draft.status==='failed'
+            ? 'Generation stopped. Saved drafts and earlier renders are preserved.'
+            : draft.status.replaceAll('_',' ')}
         </div>
         {draft.research_failure_code&&<p role="status"><b>{draft.research_failure_code==='search_failed'?'Search service unavailable':draft.research_failure_code==='analysis_service_failed'?'AI evidence service unavailable':'Evidence insufficient'}</b> — saved script edits and prior renders are preserved.</p>}
         {draft.ai_fallback_mode&&<div role="status" className="title-short-info" style={{marginBottom:12}}><b>Source-grounded quota fallback active:</b> Live AI hit its rate limit, so this draft was assembled directly from fetched real sources. Review and edit the narration below before rendering.</div>}
@@ -461,17 +448,51 @@ export default function TitleShort() {
           </div>
           <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
             <Button disabled={running||dirty} onClick={()=>action('/'+id+'/sources',{revision:draft.revision,source_urls:sourceText.split(/\n/).map(s=>s.trim()).filter(Boolean)})}>Verify URLs and retry research</Button>
-            {['research_verification','script'].includes(draft.failed_step)&&draft.sources.length>0&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/retry?refresh_sources=false',{revision:draft.revision})}>Recheck retrieved claims and propose supported scope</Button>}
+            {['research_verification','script'].includes(draft.failed_step)&&draft.sources.length>0&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/retry?refresh_sources=false',{revision:draft.revision})}>Recheck retrieved facts and write script</Button>}
             <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/retry',{revision:draft.revision})}>Retry automatic research (preserve edits)</Button>
           </div>
         </section>}
 
-        {!!draft.research_diagnostics?.length&&<details className="title-short-panel"><summary>Retrieval diagnostics</summary>{draft.research_diagnostics.map((r,i)=><p key={i}>{r.stage}: {r.result||r.feed_title} {r.url} {r.error} {r.reason} {r.detail}</p>)}</details>}
-        {!!draft.research_candidates?.length&&<details className="title-short-panel"><summary>Readable research candidates (not automatically verified)</summary>{draft.research_candidates.map(s=><p key={s.id}><a href={s.url} target="_blank" rel="noreferrer">{s.title}</a><br />Publisher/origin: {s.publisher_group} · {s.independence_group||'unassessed'}</p>)}</details>}
-        {!!draft.primary_media?.length&&<section className="title-short-panel"><h3>Video/podcast leads (authenticity not assumed)</h3>{draft.primary_media.map((m,i)=><p key={i}><a href={m.url} target="_blank" rel="noreferrer">{m.title}</a> · {m.creator}<br />{m.transcript_status} · Metadata does not verify speech.</p>)}</section>}
-        {draft.evidence_review&&<section className="title-short-panel"><h3>Incident evidence review</h3><p>{draft.evidence_review.reason}</p>{!!draft.evidence_review.verified_claims?.length&&<details><summary>Supported context (does not verify the complete title)</summary>{draft.evidence_review.verified_claims.map((c,i)=><p key={i}><b>{c.claim}</b><br />{c.evidence.map((e,j)=><span key={j}><a href={draft.sources.find(s=>s.id===e.source_id)?.url} target="_blank" rel="noreferrer">{e.source_id}, passage {e.passage_id}</a>{j<c.evidence.length-1?' · ':''}</span>)}</p>)}</details>}{draft.evidence_review.quote_checks?.map((q,i)=><p key={i}><b>{q.quote}: {q.verified?'wording/attribution verified':'unverified — excluded'}</b><br />{q.reason}</p>)}{draft.evidence_review.missing_evidence?.map((m,i)=><p key={i}>{m}</p>)}</section>}
-        {draft.analysis&&<section className="title-short-panel"><h3>{draft.research_state==='verified'?'Selected angle':'Proposed angle'}</h3>{!draft.sources.length&&<p>Research must confirm this angle before a script can be written.</p>}<strong>{draft.analysis.angle}</strong><p>{draft.analysis.rationale}</p><p><b>Viewer intent:</b> {draft.analysis.viewer_intent}</p></section>}
-        {!!draft.sources.length&&<section className="title-short-panel"><h3>Research sources</h3><p>{draft.research_state==='failed'?'Previous or candidate sources: latest research has not passed verification.':'Readable source text was checked. Review origin groups and factual support before rendering.'}</p>{draft.sources.map(s=><details key={s.id}><summary>{s.id}: <a href={s.url} target="_blank" rel="noreferrer">{s.title}</a></summary><p>{s.excerpt}</p></details>)}<details><summary>Claim support</summary>{draft.claims.map((c,i)=><p key={i}><b>{c.claim}</b> ({c.source_id})<br />{c.supporting_excerpt}</p>)}</details></section>}
+        {!!draft.scenes.length&&<section className="studio-card script-summary-card" style={{marginBottom:20}}>
+          <div className="studio-card-head">
+            <div>
+              <h3 style={{margin:0,display:'flex',alignItems:'center',gap:8}}>
+                <FileText size={18} />
+                <span>Generated Script</span>
+              </h3>
+              <p className="vault-helper-text" style={{margin:'4px 0 0'}}>
+                {scriptWords} words · ~{scriptEstSec}s spoken ({draft.duration}s target · {draft.language})
+              </p>
+            </div>
+            <div className="studio-action-row">
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(combinedScript).then(() => setReviewNotice('Copied generated script to clipboard.')).catch(() => {});
+                }}
+              >
+                <Copy size={14} />
+                <span>Copy Script</span>
+              </Button>
+              <Button
+                disabled={running||dirty||['failed','in_progress'].includes(draft.research_state)}
+                onClick={renderShort}
+              >
+                {running&&['validating','visuals','voiceover','rendering'].includes(draft?.status)?`Rendering (${draft.status} · ${elapsedSec}s)…`:'Render 9:16 Short'}
+              </Button>
+            </div>
+          </div>
+          {reviewNotice&&!draft.video_url&&<div className="notice notice-success" role="status" style={{marginBottom:12}}>{reviewNotice}</div>}
+          <div className="generated-script-body" dir={draft.language==='Urdu'?'rtl':'ltr'}>
+            {draft.scenes.map((sc,idx)=>(
+              <p key={sc.number} className="generated-script-line">
+                <span className="script-scene-tag">Scene {String(sc.number).padStart(2,'0')}</span>
+                <span>{texts[idx]??sc.narration}</span>
+              </p>
+            ))}
+          </div>
+        </section>}
 
         {!!draft.scenes.length&&<section className="title-short-panel">
           <h3>Interactive Scene Storyboard</h3>
@@ -484,8 +505,8 @@ export default function TitleShort() {
               <div>
                 <div className="storyboard-head">
                   <span className="scene-badge">Scene {String(scene.number).padStart(2,'0')} · {scene.start.toFixed(1)}–{scene.end.toFixed(1)}s</span>
-                  {scene.asset?.celebrity_name&&<span className="celeb-pill">{scene.asset.celebrity_name}</span>}
-                  {scene.asset?.provider&&<span className="filter-pill" style={{height:24,fontSize:11,padding:'0 10px'}}>{scene.asset.provider}</span>}
+                  {scene.asset?.celebrity_name&&<span className="celeb-pill">{scene.asset.provider==='celebrity_vault'?`Local Vault: ${scene.asset.celebrity_name}`:scene.asset.celebrity_name}</span>}
+                  {scene.asset?.provider&&scene.asset.provider!=='celebrity_vault'&&<span className="filter-pill" style={{height:24,fontSize:11,padding:'0 10px'}}>{scene.asset.provider}</span>}
                 </div>
 
                 <div className="studio-field">
@@ -569,12 +590,12 @@ export default function TitleShort() {
           <div className="title-short-actions" style={{alignItems:'center'}}>
             <Button variant="secondary" disabled={running||!dirty} onClick={()=>action('/'+id+'/script',{revision:draft.revision,narrations:texts},'PUT')}>Save script edits</Button>
             {draft.media_mode!=='local'&&draft.scenes.some(s=>!s.preview_url)&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/visuals',{revision:draft.revision})}>Fetch real photos / clips</Button>}
-            <Button disabled={running||dirty||!draft.scope_accepted||['failed','in_progress'].includes(draft.research_state)} onClick={()=>action('/'+id+'/render',{revision:draft.revision})}>
-              {running&&['validating','visuals','voiceover','rendering'].includes(draft?.status)?`Rendering (${draft.status} · ${elapsedSec}s)…`:'Render reviewed short'}
+            <Button disabled={running||dirty||['failed','in_progress'].includes(draft.research_state)} onClick={renderShort}>
+              {running&&['validating','visuals','voiceover','rendering'].includes(draft?.status)?`Rendering (${draft.status} · ${elapsedSec}s)…`:'Render 9:16 Short'}
             </Button>
             {(() => {
               const wc = texts.join(' ').trim().split(/\s+/).filter(Boolean).length;
-              const est = Math.round(wc / 2.1);
+              const est = Math.round(wc / estWps);
               return <span className="studio-hint" style={{fontSize:12,color:'#64748b'}}>{wc} words (~{est}s voice vs {draft.duration}s max)</span>;
             })()}
           </div>
@@ -592,13 +613,12 @@ export default function TitleShort() {
         {draft.video_url&&<section className="studio-card" style={{marginBottom:20}}>
           <h3>Final 9:16 Preview &amp; Export</h3>
           <video className="title-short-video" key={draft.video_url} controls preload="metadata" src={mediaUrl(draft.video_url)} />
-          <p>{draft.output_duration?.toFixed(2)}s actual · {draft.voice?.provider} · {draft.voice?.voice} · Approval status: <b>{draft.review_status}</b></p>
+          <p>{draft.output_duration?.toFixed(2)}s actual · {draft.voice?.provider} · {draft.voice?.voice}</p>
           {reviewNotice&&<div className="notice notice-success" role="status">{reviewNotice}</div>}
-          {draft.review_note&&<div className="notice notice-info">Owner note: {draft.review_note}</div>}
           <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
-            {canDownload
-              ? <a className="button button-primary" href={mediaUrl(draft.video_url+'&download=true')} download={`short-${draft.id}.mp4`}>Download Final MP4</a>
-              : <span className="studio-lock-pill">Download locked until Owner approves</span>}
+            {canDownload && (
+              <a className="button button-primary" href={mediaUrl(draft.video_url+'&download=true')} download={`short-${draft.id}.mp4`}>Download Final MP4</a>
+            )}
             {canDownload && (
               <Button
                 variant="secondary"
@@ -611,22 +631,30 @@ export default function TitleShort() {
                 Copy Title &amp; Script
               </Button>
             )}
-            {!isAdmin && draft.status==='ready' && !['approved','uploaded'].includes(draft.review_status) && (
-              <Button loading={reviewBusy} onClick={submitForReview}>
-                {draft.review_status==='pending_review' ? 'Refresh Approval Request' : 'Submit for Owner Approval'}
+            {canRemoveDraft(draft) && (
+              <Button variant="danger" disabled={busy} onClick={() => removeDraft(draft.id, draft.title, true)}>
+                <Trash2 size={14} /><span>Remove Draft</span>
               </Button>
             )}
-            {isAdmin && draft.status==='ready' && !['approved','uploaded'].includes(draft.review_status) && (
-              <Button loading={reviewBusy} onClick={approveDraft}>Approve &amp; Unlock for Team</Button>
-            )}
-            {isAdmin && <Link className="button button-secondary" to="/review-queue">Open Review Queue</Link>}
             <a className="button button-secondary" href={mediaUrl(draft.credits_url+'&download=true')}>Download photo credits</a>
             <a className="button button-secondary" href={mediaUrl(draft.sources_url+'&download=true')}>Download research sources</a>
           </div>
         </section>}
 
         {draft.render_history.length>0&&<details className="title-short-panel"><summary>Preserved renders</summary>{draft.render_history.map(v=><p key={v.revision}>Version {v.revision}: <a href={mediaUrl(v.video_url)} target="_blank" rel="noreferrer">Preview</a>{canDownload && <> · <a href={mediaUrl(v.video_url+'&download=true')}>Download</a></>}</p>)}</details>}
-      </>}
+
+        {(!!draft.sources.length||!!draft.research_diagnostics?.length||!!draft.research_candidates?.length||!!draft.primary_media?.length)&&(
+          <details className="title-short-panel">
+            <summary>Research sources &amp; verification details ({draft.sources.length} sources)</summary>
+            {draft.sources.map(s=><details key={s.id}><summary>{s.id}: <a href={s.url} target="_blank" rel="noreferrer">{s.title}</a></summary><p>{s.excerpt}</p></details>)}
+            {!!draft.claims?.length&&<details><summary>Claim support ({draft.claims.length})</summary>{draft.claims.map((c,i)=><p key={i}><b>{c.claim}</b> ({c.source_id})<br />{c.supporting_excerpt}</p>)}</details>}
+            {!!draft.primary_media?.length&&<details><summary>Video/podcast leads ({draft.primary_media.length})</summary>{draft.primary_media.map((m,i)=><p key={i}><a href={m.url} target="_blank" rel="noreferrer">{m.title}</a> · {m.creator} ({m.transcript_status})</p>)}</details>}
+            {!!draft.research_candidates?.length&&<details><summary>Candidate leads ({draft.research_candidates.length})</summary>{draft.research_candidates.map(s=><p key={s.id}><a href={s.url} target="_blank" rel="noreferrer">{s.title}</a> · {s.publisher_group}</p>)}</details>}
+            {!!draft.research_diagnostics?.length&&<details><summary>Retrieval diagnostics ({draft.research_diagnostics.length})</summary>{draft.research_diagnostics.map((r,i)=><p key={i}>{r.stage}: {r.result||r.feed_title} {r.url} {r.error} {r.reason} {r.detail}</p>)}</details>}
+          </details>
+        )}
+      </>;
+      })()}
 
       {!id&&history.length>0&&<section className="studio-card" style={{marginTop:20}}>
         <h3 style={{marginTop:0}}>Recent Title Drafts</h3>
@@ -636,7 +664,7 @@ export default function TitleShort() {
             <div key={row.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,padding:'10px 12px',borderRadius:10,border:'1px solid var(--line)',background:'var(--surface-alt)'}}>
               <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
                 <Link to={'/title-to-short/'+row.id} style={{fontWeight:600}}>{row.title}</Link>
-                <span className={'status-badge '+(row.review_status||'draft')}>{row.review_status||row.status.replaceAll('_',' ')}</span>
+                <span className={'status-badge '+(row.video_url || row.status === 'ready' ? 'approved' : row.status)}>{row.video_url || row.status === 'ready' ? 'Ready MP4' : row.status.replaceAll('_',' ')}</span>
               </div>
               {canRemoveDraft(row)&&(
                 <Button variant="danger" disabled={busy} onClick={()=>removeDraft(row.id, row.title, false)} title="Remove draft">

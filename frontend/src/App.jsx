@@ -3,14 +3,12 @@ import UploadHistory from "./pages/UploadHistory";
 import Analytics from "./pages/Analytics";
 import MediaLibrary from "./pages/MediaLibrary";
 import CelebrityLibrary from "./pages/CelebrityLibrary";
-import ReviewQueue from "./pages/ReviewQueue";
 import { useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { UploadProvider } from "./context/UploadContext";
 import { Shell } from "./components/Shell";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
-import Join from "./pages/Join";
-import Team from "./pages/Team";
 import Personalities from "./pages/Personalities";
 import TitleShort from "./pages/TitleShort";
 import CreateShort from "./pages/CreateShort";
@@ -26,32 +24,31 @@ export default function App() {
     localStorage.removeItem("workspace_id");
     localStorage.setItem("token", result.access_token);
     localStorage.setItem("user", JSON.stringify(result.user));
-    localStorage.setItem("role", result.role);
+    localStorage.setItem("role", result.role || "OWNER");
     setUser(result.user);
   }
   const auth = (element) => localStorage.getItem("token") ? <Shell user={user}>{element}</Shell> : <Navigate to="/login" replace />;
-  const adminOnly = (element) => auth(["OWNER", "ADMIN"].includes(localStorage.getItem("role")) ? element : <Navigate to="/" replace />);
-  const creatorOnly = (element) => auth(localStorage.getItem("role") !== "VIEWER" ? element : <Navigate to="/" replace />);
-  return <Routes>
+  return <UploadProvider key={user?.id || "anon"}><Routes>
     <Route path="/login" element={localStorage.getItem("token") ? <Navigate to="/" replace /> : <Login onLogin={signIn} />} />
-    <Route path="/join" element={<Join onLogin={signIn} />} />
+    <Route path="/register" element={<Login onLogin={signIn} initialMode="register" />} />
+    <Route path="/join" element={<Navigate to="/register" replace />} />
     <Route path="/" element={auth(<Dashboard />)} />
-    <Route path="/analytics" element={adminOnly(<Analytics />)} />
+    <Route path="/analytics" element={auth(<Analytics />)} />
     <Route path="/library" element={auth(<MediaLibrary />)} />
-    <Route path="/celebrity-library" element={creatorOnly(<CelebrityLibrary />)} />
-    <Route path="/review-queue" element={auth(<ReviewQueue />)} />
+    <Route path="/celebrity-library" element={auth(<CelebrityLibrary />)} />
+    <Route path="/review-queue" element={<Navigate to="/videos" replace />} />
     <Route path="/channels" element={<Navigate to="/" replace />} />
-    <Route path="/team" element={auth(<Team />)} />
-    <Route path="/personalities" element={adminOnly(<Personalities />)} />
-    <Route path="/create" element={adminOnly(<CreateShort />)} />
-    <Route path="/title-to-short" element={creatorOnly(<TitleShort />)} />
-    <Route path="/title-to-short/:id" element={creatorOnly(<TitleShort />)} />
+    <Route path="/team" element={<Navigate to="/" replace />} />
+    <Route path="/personalities" element={auth(<Personalities />)} />
+    <Route path="/create" element={auth(<CreateShort />)} />
+    <Route path="/title-to-short" element={auth(<TitleShort />)} />
+    <Route path="/title-to-short/:id" element={auth(<TitleShort />)} />
     <Route path="/title-short" element={<Navigate to="/title-to-short" replace />} />
     <Route path="/videos" element={auth(<Videos />)} />
-    <Route path="/videos/:id" element={adminOnly(<Review />)} />
+    <Route path="/videos/:id" element={auth(<Review />)} />
     <Route path="/account" element={auth(<Account />)} />
     <Route path="/uploads" element={auth(<UploadHistory />)} />
-    <Route path="/settings" element={adminOnly(<Settings />)} />
+    <Route path="/settings" element={auth(<Settings />)} />
     <Route path="*" element={<Navigate to="/" replace />} />
-  </Routes>;
+  </Routes></UploadProvider>;
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight,
+  Check,
   CheckCircle2,
   Clock3,
   Download,
@@ -9,6 +10,7 @@ import {
   FolderOpen,
   Lock,
   Plus,
+  Share2,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -98,8 +100,6 @@ export default function Dashboard() {
     return <Loading />;
   }
 
-  const role = data.role || localStorage.getItem("role") || "MEMBER";
-  const isAdmin = ["OWNER", "ADMIN"].includes(role);
   const summary = data.shorts_summary || {
     total: 0,
     rendering: 0,
@@ -109,6 +109,7 @@ export default function Dashboard() {
     uploaded: 0,
   };
   const recentShorts = data.recent_shorts || [];
+  const readyCount = recentShorts.filter((s) => Boolean(s.video_url) || s.status === "ready").length;
 
   return (
     <div>
@@ -117,21 +118,13 @@ export default function Dashboard() {
 
       <section className="studio-hero">
         <div>
-          <span className={`studio-role-chip ${isAdmin ? "admin" : "member"}`}>
-            <ShieldCheck size={13} />
-            <span>
-              {role === "OWNER"
-                ? "Workspace Owner"
-                : role === "ADMIN"
-                ? "Isolated Workspace Owner"
-                : "Employee Creator"}
-            </span>
+          <span className="studio-role-chip admin">
+            <Sparkles size={13} />
+            <span>Creator Studio</span>
           </span>
           <h1>Welcome back, {data.user}</h1>
           <p>
-            {isAdmin
-              ? "Manage your private workspace, review employee-created shorts, approve final videos, and download ready-to-publish MP4s."
-              : "Create high-retention Shorts from any title, pick visuals from the shared Celebrity Vault, submit for approval, and download once approved."}
+            Create high-retention 9:16 AI Shorts from any title, sync your Celebrity Folder once, and download ready-to-publish MP4 videos directly.
           </p>
         </div>
         <div className="studio-action-row">
@@ -141,10 +134,10 @@ export default function Dashboard() {
               <span>Create New Short</span>
             </Button>
           </Link>
-          <Link to="/review-queue">
+          <Link to="/celebrity-library">
             <Button variant="secondary">
-              <Sparkles size={15} />
-              <span>Review Queue ({summary.pending_review + (data.waiting_approval || 0)})</span>
+              <FolderOpen size={15} />
+              <span>Celebrity Folder</span>
             </Button>
           </Link>
           <Link to="/videos">
@@ -153,25 +146,40 @@ export default function Dashboard() {
               <span>My Videos &amp; Downloads</span>
             </Button>
           </Link>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              const url = `${window.location.origin}/register`;
+              navigator.clipboard?.writeText(url).then(() => {
+                setBanner(`Signup link copied (${url}) — anyone signing up with email & password gets their own private workspace.`);
+              }).catch(() => {
+                setBanner(`Share this signup link: ${url}`);
+              });
+            }}
+          >
+            <Share2 size={15} />
+            <span>Share Signup Link</span>
+          </Button>
         </div>
       </section>
 
       <div className="studio-kpi-grid">
         <div className="studio-kpi-card">
           <div className="studio-kpi-top">
-            <span>Pending Owner Review</span>
-            <Clock3 size={16} />
+            <span>Ready to Download</span>
+            <CheckCircle2 size={16} />
           </div>
-          <strong>{summary.pending_review + (data.waiting_approval || 0)}</strong>
-          <small>{isAdmin ? "Rendered shorts awaiting your approval" : "Download unlocks after Owner approval"}</small>
+          <strong>{summary.approved + summary.uploaded + summary.pending_review || readyCount}</strong>
+          <small>Final 9:16 MP4 videos ready</small>
         </div>
         <div className="studio-kpi-card">
           <div className="studio-kpi-top">
-            <span>Approved Shorts</span>
-            <CheckCircle2 size={16} />
+            <span>Drafts &amp; Rendering</span>
+            <Clock3 size={16} />
           </div>
-          <strong>{summary.approved + summary.uploaded + (data.approved || 0)}</strong>
-          <small>Ready to download as 9:16 MP4</small>
+          <strong>{summary.rendering}</strong>
+          <small>Active scripts and renders</small>
         </div>
         <div className="studio-kpi-card">
           <div className="studio-kpi-top">
@@ -179,15 +187,15 @@ export default function Dashboard() {
             <Film size={16} />
           </div>
           <strong>{summary.total}</strong>
-          <small>{isAdmin ? "Created across this workspace" : "Only visible to you & workspace owner"}</small>
+          <small>Saved inside your studio</small>
         </div>
         <div className="studio-kpi-card">
           <div className="studio-kpi-top">
-            <span>{isAdmin ? "Team & Processing" : "Processing Drafts"}</span>
-            <Users size={16} />
+            <span>Export Format</span>
+            <Download size={16} />
           </div>
-          <strong>{isAdmin ? `${data.total_members || 1} members` : `${summary.rendering} active`}</strong>
-          <small>{isAdmin ? `${summary.rendering} active rendering / draft` : "Active script & render drafts"}</small>
+          <strong>MP4 9:16</strong>
+          <small>Direct manual download enabled</small>
         </div>
       </div>
 
@@ -197,12 +205,10 @@ export default function Dashboard() {
             <div>
               <h2>
                 <Film size={17} />
-                <span>{isAdmin ? "Workspace Recent Shorts" : "My Recent Shorts"}</span>
+                <span>Recent Shorts</span>
               </h2>
               <p className="studio-subtext">
-                {isAdmin
-                  ? "Review and approve employee drafts before downloads unlock."
-                  : "Track generation status and download your approved final shorts."}
+                Open drafts, preview renders, or download ready MP4 files directly.
               </p>
             </div>
             <Link to="/videos" className="text-link">
@@ -229,7 +235,7 @@ export default function Dashboard() {
           ) : (
             <div style={{ display: "grid", gap: 12 }}>
               {recentShorts.map((item) => {
-                const canDownload = isAdmin || ["approved", "uploaded"].includes(item.review_status);
+                const canDownload = Boolean(item.video_url);
                 const latestRev = item.render_history?.at(-1)?.revision || item.revision;
                 const downloadHref = item.video_url
                   ? mediaUrl(`${item.video_url}&download=true`)
@@ -248,12 +254,9 @@ export default function Dashboard() {
                   >
                     <div className="studio-action-row" style={{ justifyContent: "space-between" }}>
                       <div className="studio-action-row">
-                        <span className={`studio-badge ${item.review_status || "draft"}`}>
-                          {formatShortStatus(item.review_status)}
+                        <span className={`studio-badge ${canDownload ? "approved" : "draft"}`}>
+                          {canDownload ? "Ready MP4" : "Draft"}
                         </span>
-                        {isAdmin && item.creator_name && (
-                          <span className="mood-tag">By {item.creator_name}</span>
-                        )}
                       </div>
                       <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
                         {item.language} • {item.output_duration ? `${Math.round(item.output_duration)}s` : `${item.duration}s`}
@@ -262,9 +265,6 @@ export default function Dashboard() {
 
                     <div>
                       <strong style={{ fontSize: 14, color: "var(--text)" }}>{item.title}</strong>
-                      {item.review_note && (
-                        <p className="studio-subtext">Review note: {item.review_note}</p>
-                      )}
                     </div>
 
                     <div className="studio-action-row" style={{ justifyContent: "space-between" }}>
@@ -272,16 +272,7 @@ export default function Dashboard() {
                         <Button variant="secondary">Open Project</Button>
                       </Link>
                       <div className="studio-action-row">
-                        {isAdmin && item.review_status === "pending_review" && item.status === "ready" && (
-                          <Button
-                            loading={busyId === item.id}
-                            onClick={() => quickApprove(item.id)}
-                          >
-                            <CheckCircle2 size={14} />
-                            <span>Approve</span>
-                          </Button>
-                        )}
-                        {item.video_url && canDownload && (
+                        {downloadHref && canDownload && (
                           <a href={downloadHref} download={`short-${item.id}-rev${latestRev}.mp4`}>
                             <Button variant="secondary">
                               <Download size={14} />
@@ -289,22 +280,14 @@ export default function Dashboard() {
                             </Button>
                           </a>
                         )}
-                        {item.video_url && !canDownload && (
-                          <span className="studio-lock-pill">
-                            <Lock size={12} />
-                            <span>Approval required to download</span>
-                          </span>
-                        )}
-                        {(isAdmin || ["draft", "rejected"].includes(item.review_status || "draft")) && (
-                          <Button
-                            variant="danger"
-                            loading={busyId === item.id}
-                            onClick={() => quickDeleteShort(item)}
-                            title={isAdmin ? "Delete short" : "Remove draft"}
-                          >
-                            <Trash2 size={14} />
-                          </Button>
-                        )}
+                        <Button
+                          variant="danger"
+                          loading={busyId === item.id}
+                          onClick={() => quickDeleteShort(item)}
+                          title="Delete short or draft"
+                        >
+                          <Trash2 size={14} />
+                        </Button>
                       </div>
                     </div>
                   </article>
@@ -328,9 +311,7 @@ export default function Dashboard() {
             <div className="studio-role-card">
               <strong>Download &amp; Publish Anywhere</strong>
               <p>
-                {isAdmin
-                  ? "Generate, review, approve, and download final 9:16 MP4 videos directly — ready to upload manually to any channel you want."
-                  : "Create Shorts from Title, use shared Celebrity Vault visuals, remove unsubmitted drafts anytime, and download approved MP4 files directly."}
+                Generate and download final 9:16 MP4 videos directly — ready to upload manually to YouTube, TikTok, or Instagram whenever you want.
               </p>
             </div>
           </section>
@@ -338,29 +319,27 @@ export default function Dashboard() {
           <section className="studio-card">
             <div className="studio-card-head">
               <h2>
-                <Users size={17} />
-                <span>Team &amp; Studio Resources</span>
+                <FolderOpen size={17} />
+                <span>Celebrity Folder &amp; Media</span>
               </h2>
-              <Link to="/team" className="text-link">
-                Team &amp; Roles <ArrowRight size={13} />
+              <Link to="/celebrity-library" className="text-link">
+                Open Folder <ArrowRight size={13} />
               </Link>
             </div>
             <p className="studio-subtext" style={{ marginBottom: 12 }}>
-              {isAdmin
-                ? `Active workspace members: ${data.total_members || 1}. Generate shareable invite links for Employees or create a 100% isolated Friend workspace.`
-                : "Use the shared workspace Celebrity Folder when building scenes, then submit for Owner review to unlock MP4 download."}
+              Select your main Celebrity Folder once for ultra-fast delta sync. Already uploaded clips skip automatically, and background uploads stay active across pages.
             </p>
             <div className="studio-action-row">
-              <Link to="/team">
-                <Button variant="secondary">
-                  <Users size={14} />
-                  <span>{isAdmin ? "Roles & Invite Links" : "View Team & Roles"}</span>
-                </Button>
-              </Link>
               <Link to="/celebrity-library">
                 <Button variant="secondary">
                   <FolderOpen size={14} />
                   <span>Celebrity Folder</span>
+                </Button>
+              </Link>
+              <Link to="/library">
+                <Button variant="secondary">
+                  <Film size={14} />
+                  <span>Media Library</span>
                 </Button>
               </Link>
             </div>

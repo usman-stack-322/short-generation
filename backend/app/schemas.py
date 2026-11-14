@@ -12,6 +12,12 @@ class LoginInput(InputModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class RegisterInput(InputModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: EmailStr
+    password: str = Field(min_length=6, max_length=128)
+
+
 class ForgotPasswordInput(InputModel):
     email: EmailStr
 

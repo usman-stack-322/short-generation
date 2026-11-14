@@ -1,10 +1,22 @@
 import { useEffect, useState } from "react";
 import { api, mediaUrl } from "../services/api";
+import { useUploads } from "../context/UploadContext";
 import { PageHeader, EmptyState } from "../components/Shell";
 import { Button } from "../components/UI";
-import { Film, FolderOpen, FolderUp, Image as ImageIcon, Lock, RefreshCw, Search, Upload } from "lucide-react";
-
-const ALLOWED_EXT_RE = /\.(jpg|jpeg|png|webp|mp4|mov|webm|mkv|m4v)$/i;
+import {
+  CheckCircle2,
+  Film,
+  FolderOpen,
+  FolderSync,
+  FolderUp,
+  Image as ImageIcon,
+  Loader2,
+  RefreshCw,
+  Search,
+  Trash2,
+  Upload,
+  XCircle,
+} from "lucide-react";
 
 async function collectDroppedFiles(dataTransfer) {
   const items = Array.from(dataTransfer?.items || []);
@@ -35,6 +47,15 @@ async function collectDroppedFiles(dataTransfer) {
 }
 
 export default function CelebrityLibrary() {
+  const {
+    vaultJob,
+    vaultVersion,
+    savedFolder,
+    forgetSavedFolder,
+    startVaultUpload,
+    startVaultUploadFromHandle,
+    cancelVaultUpload,
+  } = useUploads();
   const [library, setLibrary] = useState(null);
   const [folderPath, setFolderPath] = useState("");
   const [preference, setPreference] = useState("mix_both");
@@ -43,9 +64,14 @@ export default function CelebrityLibrary() {
   const [query, setQuery] = useState("");
   const [mediaFilter, setMediaFilter] = useState("all");
   const [busy, setBusy] = useState(false);
-  const [progressText, setProgressText] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+
+  const supportsFolderPicker =
+    typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
+  const uploadActive = Boolean(
+    vaultJob && ["scanning", "checking", "uploading", "indexing"].includes(vaultJob.phase)
+  );
 
   async function load() {
     try {
@@ -58,12 +84,12 @@ export default function CelebrityLibrary() {
     }
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [vaultVersion]);
 
   async function connectFolder(e) {
     if (e) e.preventDefault();
     if (!folderPath.trim()) return;
-    setBusy(true); setError(""); setStatus(""); setProgressText("Scanning local directory…");
+    setBusy(true); setError(""); setStatus("");
     try {
       const res = await api("/assets/connect-folder", {
         method: "POST",
@@ -75,66 +101,17 @@ export default function CelebrityLibrary() {
       setError(err.message);
     } finally {
       setBusy(false);
-      setProgressText("");
     }
   }
 
-  async function uploadEntries(rawItems) {
-    const valid = (rawItems || []).filter(({ file, relPath }) => {
-      const name = relPath || file.name || "";
-      return ALLOWED_EXT_RE.test(name) && file.size > 0;
+  function uploadEntries(rawItems) {
+    setError("");
+    setStatus("");
+    startVaultUpload({
+      rawItems,
+      celebrityName: bulkCelebrity,
+      preference,
     });
-    if (!valid.length) {
-      setError("No supported image (.jpg/.png/.webp) or video (.mp4/.mov/.webm) files found.");
-      return;
-    }
-
-    // Group into batches of max 8 files or 50 MB so huge folders never time out
-    const batches = [];
-    let current = [];
-    let currentBytes = 0;
-    const MAX_BATCH_BYTES = 50 * 1024 * 1024;
-    const MAX_BATCH_FILES = 8;
-
-    for (const item of valid) {
-      if (current.length >= MAX_BATCH_FILES || (current.length > 0 && currentBytes + item.file.size > MAX_BATCH_BYTES)) {
-        batches.push(current);
-        current = [];
-        currentBytes = 0;
-      }
-      current.push(item);
-      currentBytes += item.file.size;
-    }
-    if (current.length) batches.push(current);
-
-    setBusy(true); setError(""); setStatus("");
-    let uploadedCount = 0;
-    let lastRes = null;
-
-    try {
-      for (let i = 0; i < batches.length; i++) {
-        const batch = batches[i];
-        const isLast = i === batches.length - 1;
-        setProgressText(`Uploading batch ${i + 1} of ${batches.length} (${uploadedCount}/${valid.length} files)…`);
-        const fd = new FormData();
-        fd.append("celebrity_name", bulkCelebrity);
-        fd.append("skip_scan", isLast ? "false" : "true");
-        for (const { file, relPath } of batch) {
-          fd.append("files", file, relPath || file.webkitRelativePath || file.name);
-        }
-        lastRes = await api("/assets/upload-bulk", { method: "POST", body: fd });
-        uploadedCount += batch.length;
-      }
-      if (lastRes) {
-        setStatus(`Uploaded ${uploadedCount} files & indexed ${lastRes.total_assets} total assets across ${lastRes.celebrities.length} celebrities.`);
-      }
-      await load();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-      setProgressText("");
-    }
   }
 
   function uploadBulkFiles(fileList) {
@@ -142,7 +119,52 @@ export default function CelebrityLibrary() {
       file,
       relPath: file.webkitRelativePath || file.name,
     }));
-    uploadEntries(items);
+    if (items.length) uploadEntries(items);
+  }
+
+  async function rescanLibrary() {
+    setBusy(true);
+    setError("");
+    setStatus("");
+    try {
+      const res = await api("/assets/rescan", {
+        method: "POST",
+        body: JSON.stringify({ preference }),
+      });
+      setStatus(`Library rescanned (${res.total_assets} assets across ${res.celebrities.length} celebrities).`);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pickMainFolderFast() {
+    if (!supportsFolderPicker) return;
+    setError("");
+    setStatus("");
+    try {
+      const handle = await window.showDirectoryPicker({
+        id: "celebrity-vault",
+        mode: "read",
+      });
+      await startVaultUploadFromHandle(handle, {
+        celebrityName: bulkCelebrity,
+        preference,
+      });
+    } catch (err) {
+      if (err?.name !== "AbortError") {
+        setError(err?.message || "Could not open folder picker.");
+      }
+    }
+  }
+
+  function formatVaultBytes(bytes) {
+    if (!bytes || bytes <= 0) return "0 MB";
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
 
   const filteredCelebrities = (library?.celebrities || [])
@@ -153,23 +175,24 @@ export default function CelebrityLibrary() {
     }))
     .filter((c) => c.assets.length > 0);
 
-  const isAdmin = ["OWNER", "ADMIN"].includes(localStorage.getItem("role"));
+  const livePct =
+    vaultJob?.phase === "checking" && vaultJob?.totalFiles > 0
+      ? Math.min(100, Math.round(((vaultJob.checkedFiles || 0) / vaultJob.totalFiles) * 100))
+      : vaultJob?.totalBytes > 0
+      ? Math.min(100, Math.round(((vaultJob.loadedBytes || 0) / vaultJob.totalBytes) * 100))
+      : vaultJob?.phase === "done"
+      ? 100
+      : 0;
+
   return (
     <div className="celebrity-vault-page">
       <PageHeader
-        eyebrow="CELEBRITY VAULT"
+        eyebrow="PEOPLE & CLIPS"
         title="Celebrity Folder Library"
-        description="Connect a main directory of celebrity subfolders or browse the shared workspace celebrity clips and photos below."
-        action={!isAdmin && (
-          <span className="studio-lock-pill">
-            <Lock size={12} />
-            <span>View &amp; Use Only (Uploads Managed by Owner)</span>
-          </span>
-        )}
+        description="Connect a main directory of celebrity subfolders or sync your folder once — only missing clips are uploaded, even while you browse other pages."
       />
 
       {error && <div className="notice notice-error" role="alert">{error}</div>}
-      {progressText && <div className="notice notice-info" role="status">{progressText}</div>}
       {status && <div className="notice notice-success" role="status">{status}</div>}
 
       <div className="vault-top-grid">
@@ -179,7 +202,6 @@ export default function CelebrityLibrary() {
               <FolderOpen size={18} />
               <span>Connect Local Folder Path</span>
             </h3>
-            {!isAdmin && <span className="studio-lock-pill"><Lock size={12} /> Owner Only</span>}
           </div>
 
           <div className="studio-field">
@@ -190,7 +212,6 @@ export default function CelebrityLibrary() {
                 id="vault-folder-path"
                 className="studio-mono-input"
                 required
-                disabled={!isAdmin}
                 placeholder="D:\data video or C:\celebrity_vault"
                 value={folderPath}
                 onChange={(e) => setFolderPath(e.target.value)}
@@ -202,7 +223,6 @@ export default function CelebrityLibrary() {
             <label className="studio-label" htmlFor="vault-preference">Scene Matching Preference</label>
             <select
               id="vault-preference"
-              disabled={!isAdmin}
               value={preference}
               onChange={(e) => setPreference(e.target.value)}
             >
@@ -217,9 +237,8 @@ export default function CelebrityLibrary() {
           </p>
 
           <div className="studio-card-footer">
-            <Button type="submit" loading={busy} disabled={!isAdmin} style={{ width: "100%" }}>
-              {!isAdmin && <Lock size={14} />}
-              <span>{isAdmin ? "Scan & Connect Folder" : "Folder Connection Locked (Owner/Admin)"}</span>
+            <Button type="submit" loading={busy} style={{ width: "100%" }}>
+              <span>Scan &amp; Connect Folder</span>
             </Button>
           </div>
         </form>
@@ -228,16 +247,50 @@ export default function CelebrityLibrary() {
           <div className="studio-card-head">
             <h3 className="studio-card-title" style={{ margin: 0 }}>
               <Upload size={18} />
-              <span>Bulk Upload Celebrity Files</span>
+              <span>People &amp; Clips Sync</span>
             </h3>
-            {!isAdmin && <span className="studio-lock-pill"><Lock size={12} /> Owner Only</span>}
           </div>
+
+          {savedFolder?.handle && (
+            <div className="vault-saved-bar">
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                <FolderSync size={16} />
+                <span style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  Saved folder: {savedFolder.name}
+                  {savedFolder.totalFound ? ` (${savedFolder.totalFound.toLocaleString()} clips)` : ""}
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                <Button
+                  type="button"
+                  disabled={busy || uploadActive}
+                  onClick={() =>
+                    startVaultUploadFromHandle(savedFolder.handle, {
+                      celebrityName: bulkCelebrity,
+                      preference,
+                    })
+                  }
+                >
+                  <RefreshCw size={14} />
+                  <span>Quick Re-Sync</span>
+                </Button>
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  title="Forget saved folder"
+                  disabled={uploadActive}
+                  onClick={forgetSavedFolder}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="studio-field">
             <label className="studio-label" htmlFor="vault-celeb-name">Celebrity Name (leave blank when uploading a Main Folder)</label>
             <input
               id="vault-celeb-name"
-              disabled={!isAdmin}
               placeholder="Leave blank if uploading MainFolder/CelebrityName/..."
               value={bulkCelebrity}
               onChange={(e) => setBulkCelebrity(e.target.value)}
@@ -246,10 +299,9 @@ export default function CelebrityLibrary() {
 
           <div
             className={`vault-dropzone ${dragging ? "dragging" : ""}`}
-            onDragOver={(e) => { if (!isAdmin) return; e.preventDefault(); setDragging(true); }}
+            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}
             onDrop={async (e) => {
-              if (!isAdmin) return;
               e.preventDefault();
               setDragging(false);
               const items = await collectDroppedFiles(e.dataTransfer);
@@ -257,12 +309,29 @@ export default function CelebrityLibrary() {
             }}
           >
             <p className="vault-helper-text">
-              {isAdmin
-                ? "Drag & drop your entire main celebrity folder here (uploaded automatically in fast batches)"
-                : "Employee accounts can view and use shared Celebrity Vault clips below. Uploads are managed by Owner/Admin."}
+              One folder per person, named exactly like them — e.g. <code>LeBron James/</code>, <code>Prince Harry/</code>. Checks already-saved clips in seconds, uploads 6 batches in parallel, and keeps running when you change pages.
             </p>
             <div className="vault-upload-actions">
-              <label className={`button button-secondary ${!isAdmin ? "disabled" : ""}`} style={{ cursor: isAdmin ? "pointer" : "not-allowed", margin: 0, opacity: isAdmin ? 1 : 0.6 }}>
+              {supportsFolderPicker && (
+                <Button type="button" disabled={busy || uploadActive} onClick={pickMainFolderFast}>
+                  <FolderUp size={15} />
+                  <span>Select Main Folder</span>
+                </Button>
+              )}
+              <label className={`button ${supportsFolderPicker ? "button-secondary" : "button-primary"}`} style={{ cursor: "pointer", margin: 0 }}>
+                <FolderUp size={15} />
+                <span>{supportsFolderPicker ? "Browse Folder" : "Upload Main Folder"}</span>
+                <input
+                  type="file"
+                  multiple
+                  webkitdirectory=""
+                  directory=""
+                  style={{ display: "none" }}
+                  disabled={busy || uploadActive}
+                  onChange={(e) => { uploadBulkFiles(e.target.files); e.target.value = ""; }}
+                />
+              </label>
+              <label className="button button-secondary" style={{ cursor: "pointer", margin: 0 }}>
                 <ImageIcon size={15} />
                 <span>Upload Files</span>
                 <input
@@ -270,29 +339,57 @@ export default function CelebrityLibrary() {
                   multiple
                   accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm,.mkv,.m4v"
                   style={{ display: "none" }}
-                  disabled={busy || !isAdmin}
-                  onChange={(e) => uploadBulkFiles(e.target.files)}
-                />
-              </label>
-              <label className={`button button-primary ${!isAdmin ? "disabled" : ""}`} style={{ cursor: isAdmin ? "pointer" : "not-allowed", margin: 0, opacity: isAdmin ? 1 : 0.6 }}>
-                <FolderUp size={15} />
-                <span>Upload Main Folder</span>
-                <input
-                  type="file"
-                  multiple
-                  webkitdirectory=""
-                  directory=""
-                  style={{ display: "none" }}
-                  disabled={busy || !isAdmin}
-                  onChange={(e) => uploadBulkFiles(e.target.files)}
+                  disabled={busy || uploadActive}
+                  onChange={(e) => { uploadBulkFiles(e.target.files); e.target.value = ""; }}
                 />
               </label>
             </div>
           </div>
 
-          <p className="vault-helper-text">
-            Automatically detects celebrity subfolders inside your main folder (e.g. <code>MainFolder/Stephen A Smith/angry.mp4</code>).
-          </p>
+          {vaultJob && (
+            <div className={`vault-live-progress ${vaultJob.phase}`}>
+              <div className="vault-live-top">
+                <div className="vault-live-label">
+                  {uploadActive && <Loader2 size={16} className="spin" />}
+                  {vaultJob.phase === "done" && <CheckCircle2 size={16} color="#16a34a" />}
+                  {(vaultJob.phase === "error" || vaultJob.phase === "cancelled") && <XCircle size={16} color="#dc2626" />}
+                  <strong>
+                    {vaultJob.phase === "scanning"
+                      ? `Scanning folder… ${(vaultJob.checkedFiles || 0).toLocaleString()} clips found`
+                      : vaultJob.phase === "checking"
+                      ? `Checking clips ${(vaultJob.checkedFiles || 0).toLocaleString()}/${(vaultJob.totalFiles || 0).toLocaleString()}`
+                      : vaultJob.phase === "uploading"
+                      ? `Uploading clips ${(vaultJob.uploadedFiles || 0).toLocaleString()}/${(vaultJob.newFilesTotal || vaultJob.totalFiles || 0).toLocaleString()}`
+                      : vaultJob.message}
+                  </strong>
+                </div>
+                {uploadActive && (
+                  <button type="button" className="global-upload-action" onClick={cancelVaultUpload}>
+                    Stop
+                  </button>
+                )}
+              </div>
+              {uploadActive && (vaultJob.phase === "checking" || vaultJob.phase === "uploading") && (
+                <>
+                  <div className="global-upload-bar" style={{ marginTop: 8 }}>
+                    <div className="global-upload-bar-fill" style={{ width: `${livePct}%` }} />
+                  </div>
+                  <div className="global-upload-meta" style={{ marginTop: 6 }}>
+                    <span>
+                      {livePct}%
+                      {vaultJob.skippedFiles > 0 ? ` · ${vaultJob.skippedFiles.toLocaleString()} already saved` : ""}
+                    </span>
+                    {vaultJob.phase === "uploading" && vaultJob.totalBytes > 0 && (
+                      <span>
+                        {formatVaultBytes(vaultJob.loadedBytes)} / {formatVaultBytes(vaultJob.totalBytes)}
+                        {vaultJob.speedBps > 0 ? ` · ${formatVaultBytes(vaultJob.speedBps)}/s` : ""}
+                      </span>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -306,12 +403,10 @@ export default function CelebrityLibrary() {
             <span className="count-chip">{library.total_assets} assets</span>
             <span className="vault-helper-text">{library.celebrities.length} celebrities indexed (showing up to 12 previews each)</span>
           </div>
-          {["OWNER", "ADMIN"].includes(localStorage.getItem("role")) && (
-            <Button variant="secondary" disabled={busy} onClick={() => connectFolder(null)}>
-              <RefreshCw size={14} />
-              <span>Rescan</span>
-            </Button>
-          )}
+          <Button variant="secondary" disabled={busy || uploadActive} onClick={rescanLibrary}>
+            <RefreshCw size={14} />
+            <span>Rescan</span>
+          </Button>
         </div>
       )}
 

@@ -1,13 +1,17 @@
 import AppearanceSelector from "../components/AppearanceSelector";
 import BrandLogo from "../components/BrandLogo";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Eye, EyeOff, KeyRound, LockKeyhole } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowLeft, Eye, EyeOff, KeyRound, LockKeyhole, UserPlus } from "lucide-react";
 import { api } from "../services/api";
 import { Button, Notice } from "../components/UI";
 
-export default function Login({ onLogin }) {
-  const [mode, setMode] = useState("login"); // "login" | "forgot" | "reset"
+export default function Login({ onLogin, initialMode = "login" }) {
+  const [searchParams] = useSearchParams();
+  const queryMode = searchParams.get("mode");
+  const startMode = queryMode === "register" ? "register" : initialMode;
+  const [mode, setMode] = useState(startMode); // "login" | "register" | "forgot" | "reset"
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -22,11 +26,34 @@ export default function Login({ onLogin }) {
   function switchMode(nextMode) {
     setMode(nextMode);
     setError("");
-    if (nextMode === "login") {
+    if (nextMode === "login" || nextMode === "register") {
       setInfo("");
       setCode("");
       setNewPassword("");
       setConfirmPassword("");
+    }
+  }
+
+  async function submitRegister(event) {
+    event.preventDefault();
+    setError("");
+    setInfo("");
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters long.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await api("/auth/register", {
+        method: "POST",
+        body: JSON.stringify({ name: name.trim(), email, password }),
+      });
+      onLogin(result);
+      navigate("/");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -145,9 +172,52 @@ export default function Login({ onLogin }) {
           <span className="mobile-brand">
             <BrandLogo />
           </span>
+          {localStorage.getItem("token") && (
+            <Notice type="success">
+              You are already signed in. Creating an account below will open your own brand-new isolated workspace, or{" "}
+              <button
+                type="button"
+                className="inline-link"
+                onClick={() => navigate("/")}
+                style={{ fontWeight: 600 }}
+              >
+                return to your studio
+              </button>
+              .
+            </Notice>
+          )}
           <div className="login-icon">
-            {mode === "login" ? <LockKeyhole size={21} /> : <KeyRound size={21} />}
+            {mode === "login" ? (
+              <LockKeyhole size={21} />
+            ) : mode === "register" ? (
+              <UserPlus size={21} />
+            ) : (
+              <KeyRound size={21} />
+            )}
           </div>
+
+          {(mode === "login" || mode === "register") && (
+            <div className="auth-mode-tabs" role="tablist" aria-label="Account mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === "login"}
+                className={mode === "login" ? "active" : ""}
+                onClick={() => switchMode("login")}
+              >
+                Sign in
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === "register"}
+                className={mode === "register" ? "active" : ""}
+                onClick={() => switchMode("register")}
+              >
+                Create account
+              </button>
+            </div>
+          )}
 
           {mode === "login" && (
             <>
@@ -200,7 +270,87 @@ export default function Login({ onLogin }) {
                   Sign in <span>→</span>
                 </Button>
               </form>
-              <p>Sign in with the account supplied by your platform administrator.</p>
+              <p>
+                New here?{" "}
+                <button
+                  type="button"
+                  className="text-link"
+                  style={{ border: 0, background: "none", padding: 0 }}
+                  onClick={() => switchMode("register")}
+                >
+                  Create a free studio account
+                </button>
+              </p>
+            </>
+          )}
+
+          {mode === "register" && (
+            <>
+              <div className="eyebrow">GET STARTED</div>
+              <h2>Create your studio account</h2>
+              <p className="muted">Set your name and password to start creating AI Shorts.</p>
+              <form onSubmit={submitRegister}>
+                <label>
+                  Full name
+                  <input
+                    type="text"
+                    required
+                    minLength={2}
+                    autoComplete="name"
+                    placeholder="e.g. Ali Raza"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Email address
+                  <input
+                    type="email"
+                    required
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Password (min 6 characters)
+                  <div className="password-input">
+                    <input
+                      type={show ? "text" : "password"}
+                      required
+                      minLength={6}
+                      autoComplete="new-password"
+                      placeholder="Choose a password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      aria-label="Toggle password"
+                      onClick={() => setShow(!show)}
+                    >
+                      {show ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </label>
+                <Notice>{error}</Notice>
+                {info && <Notice type="success">{info}</Notice>}
+                <Button loading={loading} type="submit" className="full-button">
+                  Create account &amp; enter studio <span>→</span>
+                </Button>
+              </form>
+              <p>
+                Already registered?{" "}
+                <button
+                  type="button"
+                  className="text-link"
+                  style={{ border: 0, background: "none", padding: 0 }}
+                  onClick={() => switchMode("login")}
+                >
+                  Sign in instead
+                </button>
+              </p>
             </>
           )}
 

@@ -536,3 +536,159 @@ def test_initial_owner_bootstrap_and_https_media_cookie(client):
     assert 'samesite=none' in set_cookie
     assert 'secure' in set_cookie
     assert 'httponly' in set_cookie
+
+
+def test_vault_incremental_check_existing_rescan_and_library_dedup(client, tmp_path):
+    import io
+    from fastapi import UploadFile
+    from app.api.studio import upload_bulk
+    from app.models import CelebrityAsset, LibraryMedia, MediaCollection, WorkspaceMember
+
+    suffix = uuid4().hex[:8]
+    owner_email = f'vault-owner-{suffix}@example.com'
+    emp_email = f'vault-emp-{suffix}@example.com'
+    bootstrap_initial_owner(owner_email, 'VaultPass123!', 'Vault Owner')
+    owner_h = _login(client, owner_email, 'VaultPass123!')
+    owner_me = client.get('/api/auth/me', headers=owner_h).json()
+
+    emp_inv = client.post(
+        '/api/team/invite',
+        headers=owner_h,
+        json={'name': 'Vault Emp', 'email': emp_email, 'role': 'MEMBER'},
+    ).json()
+    emp_h = _login(client, emp_email, emp_inv['temporary_password'])
+
+    # Setup initial vault with one existing file + a lingering .tmp_ partial file
+    vault = tmp_path / f'vault-sync-{suffix}'
+    (vault / 'Stephen A. Smith').mkdir(parents=True)
+    existing_bytes = b'\xff\xd8\xff\xe0' + b'A' * 120
+    (vault / 'Stephen A. Smith' / 'react.jpg').write_bytes(existing_bytes)
+    (vault / 'Stephen A. Smith' / '.tmp_deadbeef_partial.mp4').write_bytes(b'partial')
+
+    conn = client.post('/api/assets/connect-folder', headers=owner_h, json={'folder_path': str(vault), 'preference': 'mix_both'})
+    assert conn.status_code == 200, conn.text
+    assert conn.json()['total_assets'] == 1  # .tmp_ ignored
+
+    # Fast manifest lists normalized lowercase relative path -> byte size, ignoring .tmp_ files
+    manifest = client.get('/api/assets/manifest', headers=owner_h)
+    assert manifest.status_code == 200, manifest.text
+    mdata = manifest.json()
+    assert mdata['total'] == 1
+    assert mdata['files'] == {'stephen a. smith/react.jpg': len(existing_bytes)}
+
+    # Pre-check detects exact existing file (index 0) and ignores new/resized items
+    chk = client.post(
+        '/api/assets/check-existing',
+        headers=owner_h,
+        json={
+            'celebrity_name': '',
+            'items': [
+                {'relative_path': 'MainFolder/Stephen A. Smith/react.jpg', 'size': len(existing_bytes)},
+                {'relative_path': 'MainFolder/Stephen A. Smith/react.jpg', 'size': len(existing_bytes) + 5},
+                {'relative_path': 'MainFolder/Kobe Bryant/clip1.mp4', 'size': 64},
+            ],
+        },
+    )
+    assert chk.status_code == 200, chk.text
+    assert chk.json()['existing_indices'] == [0]
+
+    # RBAC: employee cannot call check-existing or rescan
+    assert client.post('/api/assets/check-existing', headers=emp_h, json={'items': []}).status_code == 403
+    assert client.post('/api/assets/rescan', headers=emp_h, json={}).status_code == 403
+
+    # Upload bulk directly: existing exact size skipped, new file atomically written, asset ID preserved after rescan
+    with SessionLocal() as db:
+        first_asset = db.query(CelebrityAsset).filter_by(workspace_id=owner_me['workspace_id']).one()
+        orig_id = first_asset.id
+        owner_member = db.query(WorkspaceMember).filter_by(user_id=owner_me['id'], workspace_id=owner_me['workspace_id']).one()
+        res_bulk = upload_bulk(
+            celebrity_name='',
+            skip_scan=True,
+            skip_existing=True,
+            files=[
+                UploadFile(file=io.BytesIO(existing_bytes), filename='MainFolder/Stephen A. Smith/react.jpg', size=len(existing_bytes)),
+                UploadFile(file=io.BytesIO(b'new-clip-bytes'), filename='MainFolder/Kobe Bryant/clip1.mp4', size=14),
+            ],
+            context=(None, owner_member),
+            db=db,
+        )
+        assert res_bulk['skipped'] == 1
+        assert res_bulk['saved'] == 1
+
+    rescan = client.post('/api/assets/rescan', headers=owner_h, json={'preference': 'mix_both'})
+    assert rescan.status_code == 200
+    assert rescan.json()['total_assets'] == 2
+
+    with SessionLocal() as db:
+        preserved = db.get(CelebrityAsset, orig_id)
+        assert preserved is not None and preserved.file_name == 'react.jpg'
+
+    # Media library collection check-existing matches existing image by name and exact byte size
+    col_res = client.post('/api/library/collections', headers=owner_h, json={'name': f'Col-{suffix}', 'channel_id': None})
+    assert col_res.status_code == 201
+    col_id = col_res.json()['id']
+    lib_file = tmp_path / f'lib-{suffix}.jpg'
+    lib_bytes = b'lib-photo-content-12345'
+    lib_file.write_bytes(lib_bytes)
+    with SessionLocal() as db:
+        db.add(LibraryMedia(
+            id=new_id(), collection_id=col_id, name='sample.jpg', media_type='photo',
+            creator='Owner', license='Own work', local_path=str(lib_file),
+            content_hash=uuid4().hex, approved=True, archived=False,
+        ))
+        db.commit()
+
+    lib_chk = client.post(
+        f'/api/library/collections/{col_id}/check-existing',
+        headers=owner_h,
+        json={'items': [{'name': 'sample.jpg', 'size': len(lib_bytes)}, {'name': 'other.jpg', 'size': 10}]},
+    )
+    assert lib_chk.status_code == 200
+    assert lib_chk.json()['existing_indices'] == [0]
+
+
+def test_public_register_creates_isolated_workspace(client, tmp_path):
+    suffix = uuid4().hex[:8]
+    email_a = f'user-a-{suffix}@example.com'
+    email_b = f'user-b-{suffix}@example.com'
+
+    reg_a = client.post(
+        '/api/auth/register',
+        json={'name': 'Creator A', 'email': email_a, 'password': 'PasswordA123'},
+    )
+    assert reg_a.status_code == 201, reg_a.text
+    data_a = reg_a.json()
+    assert data_a['role'] == 'OWNER'
+    assert data_a['access_token']
+    headers_a = {'Authorization': f"Bearer {data_a['access_token']}"}
+
+    # Duplicate email registration is rejected cleanly with 409
+    dup = client.post(
+        '/api/auth/register',
+        json={'name': 'Dup A', 'email': email_a.upper(), 'password': 'PasswordA123'},
+    )
+    assert dup.status_code == 409
+
+    # Creator B gets a completely separate isolated workspace
+    reg_b = client.post(
+        '/api/auth/register',
+        json={'name': 'Creator B', 'email': email_b, 'password': 'PasswordB123'},
+    )
+    assert reg_b.status_code == 201, reg_b.text
+    data_b = reg_b.json()
+    assert data_b['role'] == 'OWNER'
+    assert data_b['workspace_id'] != data_a['workspace_id']
+    headers_b = {'Authorization': f"Bearer {data_b['access_token']}"}
+
+    # Vault created in A's workspace is invisible to B
+    vault_a = tmp_path / f'reg-vault-{suffix}'
+    (vault_a / 'LeBron James').mkdir(parents=True)
+    (vault_a / 'LeBron James' / 'dunk.mp4').write_bytes(b'fake-mp4-bytes-123')
+    conn_a = client.post('/api/assets/connect-folder', headers=headers_a, json={'folder_path': str(vault_a), 'preference': 'mix_both'})
+    assert conn_a.status_code == 200
+    assert conn_a.json()['total_assets'] == 1
+
+    man_b = client.get('/api/assets/manifest', headers=headers_b)
+    assert man_b.status_code == 200
+    assert man_b.json()['total'] == 0
+    assert man_b.json()['files'] == {}

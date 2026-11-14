@@ -13,4 +13,7 @@
 .title-short-placeholder{padding:36px 16px;background:var(--bg-f8f8fb,#f8fafc);border:1px dashed #cbd5e1;border-radius:12px;text-align:center;color:#64748b;font-size:12.5px}
 .title-short-page .title-short-scope-consent{display:flex;align-items:center;gap:10px;margin:14px 0;font-size:13px;font-weight:600;cursor:pointer}
 .title-short-page .title-short-scope-consent input[type="checkbox"]{width:18px;height:18px;flex:0 0 auto;margin:0;accent-color:#6366f1}
+.script-summary-card .generated-script-body{display:grid;gap:10px;padding:14px 16px;border-radius:12px;background:var(--bg-f8f8fb,#f8fafc);border:1px solid var(--edge-e6e8ef,#e2e8f0);font-size:14.5px;line-height:1.6}
+.script-summary-card .generated-script-line{margin:0;display:flex;gap:10px;align-items:flex-start}
+.script-summary-card .script-scene-tag{flex:0 0 auto;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:rgba(99,102,241,.12);color:#4f46e5;margin-top:3px}
 @media(max-width:760px){.title-short-controls{grid-template-columns:1fr}.title-short-panel{padding:16px}}

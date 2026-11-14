@@ -1,6 +1,7 @@
 """Studio APIs: Celebrity Vault, Scene Manual Upload, Review Queue, YouTube Upload, Workspaces & Team RBAC."""
 import hashlib
 import json
+import os
 import secrets
 import shutil
 from datetime import datetime, timedelta, timezone
@@ -88,6 +89,30 @@ def assets_library(limit: int = 12, context=Depends(current_context), db: Sessio
     return list_celebrity_library(db, context[1].workspace_id, limit_per_celebrity=limit)
 
 
+class UploadCheckItem(BaseModel):
+    relative_path: str = Field(min_length=1, max_length=1000)
+    size: int = Field(default=0, ge=0)
+
+
+class UploadCheckInput(BaseModel):
+    celebrity_name: str = Field(default='', max_length=160)
+    items: list[UploadCheckItem] = Field(default_factory=list, max_length=2000)
+
+
+class RescanFolderInput(BaseModel):
+    preference: str | None = Field(default=None)
+
+
+def _vault_root(db: Session, workspace_id: str) -> tuple[Path, CelebrityFolder | None]:
+    folder_row = db.get(CelebrityFolder, workspace_id)
+    if folder_row and Path(folder_row.folder_path).is_dir():
+        root = Path(folder_row.folder_path).resolve()
+    else:
+        root = (Path(settings.generated_dir).resolve() / 'celebrity_vault' / workspace_id).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+    return root, folder_row
+
+
 def _safe_rel_subdir(orig: Path, override_celebrity: str) -> Path:
     if override_celebrity.strip():
         safe = ''.join(ch for ch in override_celebrity.strip() if ch not in '\\/:*?"<>|')
@@ -104,42 +129,148 @@ def _safe_rel_subdir(orig: Path, override_celebrity: str) -> Path:
     return Path('.')
 
 
+def _resolve_vault_target(root: Path, raw_name: str, override_celebrity: str) -> Path | None:
+    clean = (raw_name or 'asset').replace('\\', '/')
+    orig = Path(clean)
+    fname = Path(orig.name).name
+    if not fname or fname.startswith('.tmp_'):
+        return None
+    if orig.suffix.lower() not in ALLOWED_EXTS:
+        return None
+    rel_sub = _safe_rel_subdir(orig, override_celebrity)
+    target = (root / rel_sub / fname).resolve()
+    if root not in target.parents:
+        return None
+    return target
+
+
+def _scan_manifest_sizes(root: Path) -> dict[str, int]:
+    """Fast recursive os.scandir walk returning lowercase relative path -> byte size."""
+    files: dict[str, int] = {}
+    root_str = str(root)
+    stack = [root_str]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    name = entry.name
+                    if name.startswith('.tmp_'):
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            ext = os.path.splitext(name)[1].lower()
+                            if ext not in ALLOWED_EXTS:
+                                continue
+                            sz = entry.stat(follow_symlinks=False).st_size
+                            if sz > 0:
+                                rel = os.path.relpath(entry.path, root_str).replace('\\', '/').lower()
+                                files[rel] = sz
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return files
+
+
+@router.get('/api/assets/manifest')
+def get_vault_manifest(
+    context=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    root, _ = _vault_root(db, context[1].workspace_id)
+    files = _scan_manifest_sizes(root)
+    return {
+        'folder_path': str(root),
+        'total': len(files),
+        'files': files,
+    }
+
+
+@router.post('/api/assets/check-existing')
+def check_existing_vault_files(
+    payload: UploadCheckInput,
+    context=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    root, _ = _vault_root(db, context[1].workspace_id)
+    existing_indices: list[int] = []
+    for idx, item in enumerate(payload.items):
+        target = _resolve_vault_target(root, item.relative_path, payload.celebrity_name)
+        if not target or not target.is_file():
+            continue
+        if item.size <= 0 or target.stat().st_size == item.size:
+            existing_indices.append(idx)
+    return {
+        'existing_indices': existing_indices,
+        'existing_count': len(existing_indices),
+        'total': len(payload.items),
+        'folder_path': str(root),
+    }
+
+
+@router.post('/api/assets/rescan')
+def rescan_vault_folder(
+    payload: RescanFolderInput | None = None,
+    context=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    workspace_id = context[1].workspace_id
+    root, folder_row = _vault_root(db, workspace_id)
+    pref = (payload.preference if payload else None) or (folder_row.preference if folder_row else 'mix_both')
+    if pref not in {'mix_both', 'prefer_clips', 'prefer_images'}:
+        pref = 'mix_both'
+    return scan_celebrity_folder(db, workspace_id, str(root), pref)
+
+
 @router.post('/api/assets/upload-bulk')
 def upload_bulk(
     celebrity_name: str = Form(''),
     skip_scan: bool = Form(False),
+    skip_existing: bool = Form(True),
     files: list[UploadFile] = File(...),
     context=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     workspace_id = context[1].workspace_id
-    folder_row = db.get(CelebrityFolder, workspace_id)
-    if folder_row and Path(folder_row.folder_path).is_dir():
-        root = Path(folder_row.folder_path)
-    else:
-        root = Path(settings.generated_dir).resolve() / 'celebrity_vault' / workspace_id
-        root.mkdir(parents=True, exist_ok=True)
+    root, folder_row = _vault_root(db, workspace_id)
     saved = 0
+    skipped = 0
     for f in files:
-        orig = Path((f.filename or 'asset').replace('\\', '/'))
-        ext = orig.suffix.lower()
-        if ext not in ALLOWED_EXTS:
-            continue
-        rel_sub = _safe_rel_subdir(orig, celebrity_name)
-        target_dir = root / rel_sub
-        target_dir.mkdir(parents=True, exist_ok=True)
-        out_path = target_dir / orig.name
-        with out_path.open('wb') as dst:
-            shutil.copyfileobj(f.file, dst)
-        if out_path.stat().st_size == 0:
-            out_path.unlink(missing_ok=True)
-            continue
-        saved += 1
-    if saved == 0 and not skip_scan:
+        try:
+            out_path = _resolve_vault_target(root, f.filename or 'asset', celebrity_name)
+            if not out_path:
+                continue
+            file_size = getattr(f, 'size', None) or 0
+            if skip_existing and file_size > 0 and out_path.is_file() and out_path.stat().st_size == file_size:
+                skipped += 1
+                continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = out_path.with_name(f'.tmp_{uuid4().hex[:8]}_{out_path.name}')
+            try:
+                with tmp_path.open('wb') as dst:
+                    shutil.copyfileobj(f.file, dst, length=1024 * 1024)
+                if tmp_path.stat().st_size == 0:
+                    tmp_path.unlink(missing_ok=True)
+                    continue
+                os.replace(tmp_path, out_path)
+                saved += 1
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        finally:
+            try:
+                f.file.close()
+            except Exception:
+                pass
+    if saved == 0 and skipped == 0 and not skip_scan:
         raise HTTPException(422, 'No supported image (.jpg/.png/.webp) or video (.mp4/.mov/.webm) files uploaded.')
     if skip_scan:
-        return {'saved': saved, 'scanning': False, 'folder_path': str(root)}
-    return scan_celebrity_folder(db, workspace_id, str(root), folder_row.preference if folder_row else 'mix_both')
+        return {'saved': saved, 'skipped': skipped, 'scanning': False, 'folder_path': str(root)}
+    summary = scan_celebrity_folder(db, workspace_id, str(root), folder_row.preference if folder_row else 'mix_both')
+    return {**summary, 'saved': saved, 'skipped': skipped}
 
 
 @router.get('/api/assets/vault/{asset_id}/file')

@@ -1,10 +1,13 @@
 """Connected Local Celebrity Folder scanner, scene-aware matcher, and real web photo fallback."""
+from collections import Counter
+from difflib import SequenceMatcher
 import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -41,6 +44,45 @@ _STOP_PROPER_PHRASES = {
     'this passionate', 'new york', 'los angeles', 'united states',
 }
 
+# Common editorial/title-case non-person nouns that must never trigger missing-person blocks.
+_NON_PERSON_WORDS = {
+    'clash', 'clashes', 'commentary', 'analysis', 'highlights', 'highlight', 'arena',
+    'studio', 'podcast', 'podcasts', 'show', 'debate', 'debates', 'media', 'discussion',
+    'discussions', 'court', 'floor', 'desk', 'room', 'basketball', 'football', 'baseball',
+    'soccer', 'boxing', 'ufc', 'nba', 'wnba', 'nfl', 'mlb', 'ncaa', 'news', 'report',
+    'reports', 'story', 'history', 'timeline', 'moment', 'moments', 'scene', 'clip',
+    'clips', 'video', 'videos', 'photo', 'photos', 'image', 'images', 'picture', 'crowd',
+    'fans', 'panel', 'host', 'microphone', 'microphones', 'mic', 'interview', 'interviews',
+    'conference', 'press', 'game', 'games', 'series', 'finals', 'season', 'league',
+    'championship', 'trophy', 'ring', 'rings', 'award', 'awards', 'ceremony', 'hall',
+    'fame', 'star', 'stars', 'legend', 'legends', 'player', 'players', 'coach', 'coaches',
+    'team', 'teams', 'club', 'city', 'state', 'street', 'house', 'building', 'screen',
+    'setup', 'reaction', 'reactions', 'impact', 'drama', 'beef', 'feud', 'battle', 'fight',
+    'match', 'round', 'score', 'scoreboard', 'camera', 'lighting', 'spotlight', 'stage',
+    'tour', 'concert', 'album', 'song', 'track', 'record', 'records', 'label', 'world',
+    'america', 'american', 'national', 'global', 'eastern', 'western', 'north', 'south',
+    'east', 'west', 'first', 'second', 'third', 'final', 'early', 'late', 'modern',
+    'classic', 'old', 'new', 'big', 'major', 'top', 'best', 'real', 'true', 'full',
+    'live', 'breaking', 'special', 'official', 'exclusive', 'historic', 'famous',
+    'iconic', 'heated', 'intense', 'passionate', 'sports', 'sport', 'athlete', 'athletes',
+    'athletic', 'locker', 'tunnel', 'bench', 'sideline', 'jersey', 'hoops', 'network',
+    'broadcast', 'broadcasting', 'digital', 'production', 'editorial', 'archival',
+    'youtube', 'espn', 'fox', 'tnt', 'nbc', 'cbs', 'abc', 'context', 'overviews',
+}
+
+_NICKNAME_ALIASES = {
+    'nick young': ['swaggy p', 'swaggyp'],
+    'stephen curry': ['steph curry'],
+    'lebron james': ['king james', 'bron'],
+    'shaquille o neal': ['shaq', 'shaquille oneal'],
+    'shaquille oneal': ['shaq', 'shaquille o neal'],
+    'iman shumpert': ['shump'],
+    'gilbert arenas': ['agent zero', 'gils arena'],
+    'joe budden': ['budden'],
+    'carmelo anthony': ['melo'],
+    'charles barkley': ['chuck'],
+}
+
 MOOD_KEYWORDS = {
     'angry', 'mad', 'rant', 'yelling', 'heated', 'furious', 'serious', 'stern',
     'laugh', 'laughing', 'funny', 'smile', 'smiling', 'happy', 'shocked',
@@ -56,10 +98,25 @@ AI_BLOCKLIST = (
     'fan art', 'fanart', 'drawing', 'painting', 'sketch', 'caricature',
 )
 
+WATERMARK_STOCK_BLOCKLIST = (
+    'gettyimages', 'getty', 'alamy', 'shutterstock', 'istockphoto', 'istock',
+    'dreamstime', 'depositphotos', '123rf', 'vecteezy', 'adobestock', 'stock.adobe',
+    'bigstockphoto', 'bigstock', 'canstockphoto', 'canstock', 'pond5', 'envato',
+    'elements.envato', 'graphicriver', 'freepik', 'megapixl', 'colourbox',
+    'agefotostock', 'superstock', 'corbis', 'wireimage', 'filmmagic',
+    'imago-images', 'imago.com', 'bridgeman', 'ingimage', 'dissolve.com',
+    'punchstock', 'masterfile', 'photolibrary', 'panthermedia', 'westend61',
+    'watermark', 'watermarked', 'comp-image', 'preview only', 'sample only',
+    'editorial use only', 'royalty-free preview', 'stockcake', 'rawpixel',
+    'poster', 'flyer', 'meme', 'thumbnail', 'infographic', 'text overlay',
+)
+
 
 def _norm_entity(text: str) -> str:
-    """Normalize names and queries so 'Stephen A. Smith' and 'Stephen A Smith' match cleanly."""
-    t = (text or '').replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+    """Normalize names and queries so accents, initials, and '$' aliases match cleanly."""
+    t = unicodedata.normalize('NFKD', text or '').encode('ascii', 'ignore').decode('ascii')
+    t = t.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+    t = t.replace('$', 's')
     t = re.sub(r"\b([A-Za-z])\.", r"\1", t)
     t = re.sub(r"'s\b", ' ', t, flags=re.I)
     return ' '.join(re.findall(r'[a-z0-9]+', t.lower()))
@@ -129,6 +186,8 @@ def _iter_media_files(root: Path):
     """Fast os.walk scanner supporting large nested directories."""
     for dirpath, _, filenames in os.walk(root):
         for fname in filenames:
+            if fname.startswith('.tmp_'):
+                continue
             ext = os.path.splitext(fname)[1].lower()
             if ext in ALLOWED_EXTS:
                 yield Path(dirpath) / fname, ext
@@ -139,10 +198,10 @@ def scan_celebrity_folder(db, workspace_id: str, folder_path: str, preference: s
     if not root.exists() or not root.is_dir():
         raise ValueError(f'Directory not found: {root}')
 
-    # Scan the entire directory tree completely BEFORE starting any SQLite write transaction!
-    # This avoids holding a DB write lock during disk I/O and indexes thousands of videos in < 1s.
+    # Scan the entire directory tree BEFORE starting any SQLite write transaction!
+    # Preserves existing asset IDs when unchanged so in-progress drafts/renders keep working smoothly.
     now = datetime.now(timezone.utc)
-    records: list[CelebrityAsset] = []
+    scanned: dict[str, tuple[str, str, str, str, str, str]] = {}
     celeb_names: set[str] = set()
 
     for path, ext in sorted(_iter_media_files(root), key=lambda pair: str(pair[0])):
@@ -150,23 +209,18 @@ def scan_celebrity_folder(db, workspace_id: str, folder_path: str, preference: s
             st = path.stat()
         except OSError:
             continue
+        if st.st_size <= 0:
+            continue
         media_type = 'video' if ext in VIDEO_EXTS else 'image'
         celeb_name, moods = _parse_celebrity_and_mood(root, path)
         celeb_names.add(celeb_name)
-        records.append(
-            CelebrityAsset(
-                id=new_id(),
-                workspace_id=workspace_id,
-                celebrity_name=celeb_name,
-                mood_tags=json.dumps(moods),
-                media_type=media_type,
-                file_name=path.name,
-                file_path=str(path),
-                ext=ext,
-                duration=None,
-                content_hash=_fast_fingerprint(path, st),
-                created_at=now,
-            )
+        scanned[str(path)] = (
+            celeb_name,
+            json.dumps(moods),
+            media_type,
+            path.name,
+            ext,
+            _fast_fingerprint(path, st),
         )
 
     folder_row = db.get(CelebrityFolder, workspace_id)
@@ -177,17 +231,72 @@ def scan_celebrity_folder(db, workspace_id: str, folder_path: str, preference: s
         folder_row = CelebrityFolder(workspace_id=workspace_id, folder_path=str(root), preference=preference or 'mix_both')
         db.add(folder_row)
 
-    db.query(CelebrityAsset).filter_by(workspace_id=workspace_id).delete(synchronize_session=False)
-    if records:
-        db.bulk_save_objects(records)
+    existing_rows = {
+        r.file_path: r
+        for r in db.query(CelebrityAsset).filter_by(workspace_id=workspace_id).all()
+    }
+    stale_ids = [r.id for fp, r in existing_rows.items() if fp not in scanned]
+    if stale_ids:
+        db.query(CelebrityAsset).filter(CelebrityAsset.id.in_(stale_ids)).delete(synchronize_session=False)
+
+    new_records: list[CelebrityAsset] = []
+    for fp, (celeb_name, moods_json, media_type, file_name, ext, digest) in scanned.items():
+        prev = existing_rows.get(fp)
+        if prev:
+            if (
+                prev.content_hash != digest
+                or prev.celebrity_name != celeb_name
+                or prev.mood_tags != moods_json
+                or prev.media_type != media_type
+            ):
+                prev.celebrity_name = celeb_name
+                prev.mood_tags = moods_json
+                prev.media_type = media_type
+                prev.file_name = file_name
+                prev.ext = ext
+                prev.content_hash = digest
+        else:
+            new_records.append(
+                CelebrityAsset(
+                    id=new_id(),
+                    workspace_id=workspace_id,
+                    celebrity_name=celeb_name,
+                    mood_tags=moods_json,
+                    media_type=media_type,
+                    file_name=file_name,
+                    file_path=fp,
+                    ext=ext,
+                    duration=None,
+                    content_hash=digest,
+                    created_at=now,
+                )
+            )
+
+    if new_records:
+        db.bulk_save_objects(new_records)
     db.commit()
     return {
         'workspace_id': workspace_id,
         'folder_path': str(root),
         'preference': folder_row.preference,
-        'total_assets': len(records),
+        'total_assets': len(scanned),
         'celebrities': sorted(celeb_names),
     }
+
+
+def list_vault_celebrity_names(db, workspace_id: str, limit: int = 120) -> list[str]:
+    """Return distinct local celebrity folder names sorted by asset count descending."""
+    if db is None or not workspace_id:
+        return []
+    try:
+        rows = db.query(CelebrityAsset.celebrity_name).filter_by(workspace_id=workspace_id).all()
+    except Exception:
+        return []
+    counts = Counter(
+        row[0] for row in rows
+        if row and row[0] and _norm_entity(row[0]) not in GENERIC_SUBFOLDERS and _norm_entity(row[0]) not in _GENERIC_BROLL_FOLDERS
+    )
+    return [name for name, _cnt in counts.most_common(limit)]
 
 
 def list_celebrity_library(db, workspace_id: str, limit_per_celebrity: int = 12) -> dict:
@@ -262,17 +371,45 @@ def _has_phrase(norm_haystack: str, phrase: str) -> bool:
     return re.search(rf'(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])', norm_haystack) is not None
 
 
+def _names_close(a: str, b: str) -> bool:
+    """True when two multi-word normalized names differ only by minor spelling/transliteration."""
+    ta, tb = a.split(), b.split()
+    if len(ta) < 2 or len(tb) < 2:
+        return False
+    if any(t in _NON_PERSON_WORDS for t in ta + tb):
+        return False
+    return (
+        SequenceMatcher(None, a, b).ratio() >= 0.88
+        and SequenceMatcher(None, ta[0], tb[0]).ratio() >= 0.75
+        and SequenceMatcher(None, ta[-1], tb[-1]).ratio() >= 0.75
+    )
+
+
 def _celebrity_variants(celeb_name: str) -> list[str]:
     base = _norm_entity(celeb_name)
     if not base or len(base) < 3 or base in GENERIC_SUBFOLDERS:
         return []
     variants = [base]
-    # Also match "Stephen Smith" if vault folder is "Stephen A. Smith" (single-letter middle initial)
+    compact = _norm_entity(re.sub(r"([A-Za-z])['’]([A-Za-z])", r"\1\2", celeb_name or ''))
+    if compact and compact not in variants:
+        variants.append(compact)
+    # Match "Stephen Smith" if vault folder is "Stephen A. Smith" (single-letter middle initial)
     tokens = base.split()
     if len(tokens) >= 3 and any(len(t) == 1 for t in tokens[1:-1]):
         no_mid = ' '.join(t for idx, t in enumerate(tokens) if not (0 < idx < len(tokens) - 1 and len(t) == 1))
         if no_mid and no_mid not in variants:
             variants.append(no_mid)
+    # Match joined apostrophe fragments like "shaquille o neal" -> "shaquille oneal"
+    for i in range(len(tokens) - 1):
+        if len(tokens[i]) == 1 and len(tokens[i + 1]) >= 2:
+            joined = ' '.join(tokens[:i] + [tokens[i] + tokens[i + 1]] + tokens[i + 2:])
+            if joined and joined not in variants:
+                variants.append(joined)
+    for alias_key in list(variants):
+        for alias in _NICKNAME_ALIASES.get(alias_key, []):
+            norm_alias = _norm_entity(alias)
+            if norm_alias and norm_alias not in variants:
+                variants.append(norm_alias)
     return variants
 
 
@@ -284,14 +421,26 @@ def _named_visual_people(scene: dict, people: list[str] | None) -> list[str]:
         scene.get('on_screen_text', ''),
     ])
     visual_norm = _norm_entity(visual_raw)
+    visual_compact = _norm_entity(re.sub(r"([A-Za-z])['’]([A-Za-z])", r"\1\2", visual_raw))
     found: list[str] = []
     for p in (people or []):
         pn = _norm_entity(p)
-        if pn and _has_phrase(visual_norm, pn):
-            found.append(pn)
-    for m in re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)\b', visual_raw):
+        p_compact = _norm_entity(re.sub(r"([A-Za-z])['’]([A-Za-z])", r"\1\2", p or ''))
+        if pn and (_has_phrase(visual_norm, pn) or (p_compact and _has_phrase(visual_compact, p_compact))):
+            if pn not in found:
+                found.append(pn)
+    # Only harvest unknown capitalized two-word names from image_query and visual_description
+    # (on_screen_text holds punchy headline banners like "Shumpert Clash" or "Basketball Commentary").
+    query_and_desc = ' '.join([scene.get('image_query', ''), scene.get('visual_description', '')])
+    for m in re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)\b', query_and_desc):
         pn = _norm_entity(m.group(1))
-        if pn and pn not in _STOP_PROPER_PHRASES and pn not in found:
+        words = pn.split()
+        if (
+            pn
+            and pn not in _STOP_PROPER_PHRASES
+            and not any(w in _NON_PERSON_WORDS for w in words)
+            and pn not in found
+        ):
             found.append(pn)
     return found
 
@@ -314,6 +463,7 @@ def match_celebrity_asset(
     existing = existing or []
     used_ids = {a.get('vault_asset_id') for a in existing if a and a.get('vault_asset_id')}
     used_hashes = {a.get('hash') for a in existing if a and a.get('hash')}
+    used_celebrities = Counter(a.get('celebrity_name') for a in existing if a and a.get('celebrity_name'))
 
     visual_norm = _norm_entity(' '.join([
         scene.get('image_query', ''),
@@ -324,6 +474,8 @@ def match_celebrity_asset(
     scene_norm = f'{visual_norm} {narration_norm}'.strip()
     scene_tokens = set(scene_norm.split())
     title_norm = _norm_entity(' '.join([draft_title] + list(people or [])))
+    title_tokens = set(title_norm.split())
+    domain_tokens = scene_tokens | title_tokens
     visual_people = _named_visual_people(scene, people)
 
     scene_num = int(scene.get('number') or 1)
@@ -335,15 +487,33 @@ def match_celebrity_asset(
     elif pref == 'mix_both':
         prefer_type = 'video' if scene_num % 2 == 1 else 'image'
 
-    vault_variants = {}
+    vault_variants: dict[str, list[str]] = {}
+    surname_owners: Counter[str] = Counter()
+    celeb_surname: dict[str, str] = {}
     for a in assets:
         if a.celebrity_name not in vault_variants:
-            vault_variants[a.celebrity_name] = _celebrity_variants(a.celebrity_name)
+            vlist = _celebrity_variants(a.celebrity_name)
+            vault_variants[a.celebrity_name] = vlist
+            cn = _norm_entity(a.celebrity_name)
+            if vlist and cn not in GENERIC_SUBFOLDERS and cn not in _GENERIC_BROLL_FOLDERS:
+                tokens = cn.split()
+                if len(tokens) >= 2 and len(tokens[-1]) >= 4 and tokens[-1] not in _NON_PERSON_WORDS:
+                    celeb_surname[a.celebrity_name] = tokens[-1]
+                    surname_owners[tokens[-1]] += 1
+    unique_surnames = {
+        celeb: sname for celeb, sname in celeb_surname.items() if surname_owners[sname] == 1
+    }
 
-    any_visual_person_in_vault = any(
-        any(_has_phrase(vp, v) or _has_phrase(v, vp) for vlist in vault_variants.values() for v in vlist)
-        for vp in visual_people
-    )
+    def _matches_visual_person(vp: str) -> bool:
+        for celeb_name, vlist in vault_variants.items():
+            if any(_has_phrase(vp, v) or _has_phrase(v, vp) or _names_close(vp, v) for v in vlist):
+                return True
+            sname = unique_surnames.get(celeb_name)
+            if sname and len(vp.split()) == 1 and vp == sname:
+                return True
+        return False
+
+    any_visual_person_in_vault = any(_matches_visual_person(vp) for vp in visual_people)
     # If the scene visually depicts a specific named celebrity who does not exist in the local folder,
     # return None so the Real Web Photo Fallback fetches genuine photos of THAT celebrity.
     if visual_people and not any_visual_person_in_vault:
@@ -364,17 +534,29 @@ def match_celebrity_asset(
 
         score = 0.0
         celeb_words = [w for w in celeb_norm.split() if len(w) >= 3]
+        sname = unique_surnames.get(asset.celebrity_name)
         if any(_has_phrase(visual_norm, v) for v in variants):
-            score += 250.0
+            score += 260.0
+        elif not is_broll and any(_names_close(vp, v) for vp in visual_people for v in variants):
+            score += 230.0
+        elif sname and _has_phrase(visual_norm, sname) and (
+            not visual_people or any(vp == sname or _has_phrase(vp, v) or _names_close(vp, v) for vp in visual_people for v in variants)
+        ):
+            score += 195.0
         elif any(_has_phrase(narration_norm, v) for v in variants):
-            score += 160.0
+            score += 165.0
+        elif sname and _has_phrase(narration_norm, sname):
+            score += 140.0
         elif not is_broll and len(celeb_words) >= 2 and sum(1 for w in celeb_words if w in scene_tokens) >= 2:
-            score += 120.0
-        elif is_broll and any(w in scene_tokens for w in celeb_words):
-            score += 25.0
-        elif not is_broll and not visual_people and any(_has_phrase(title_norm, v) for v in variants):
-            # Only fall back to a title celebrity if the scene itself has no missing visual subject.
-            score += 30.0
+            score += 125.0
+        elif is_broll and any(w in domain_tokens for w in celeb_words):
+            score += 40.0
+        elif not is_broll and not visual_people and (
+            any(_has_phrase(title_norm, v) for v in variants)
+            or (sname and _has_phrase(title_norm, sname))
+        ):
+            # Spread scenes across all story/title vault celebrities when a scene lacks a specific target.
+            score += 65.0
 
         if score <= 0:
             continue
@@ -382,6 +564,13 @@ def match_celebrity_asset(
         moods = json.loads(asset.mood_tags or '[]')
         mood_hits = sum(1 for m in moods if m in scene_tokens)
         score += mood_hits * 20.0
+
+        if not is_broll:
+            prior_uses = used_celebrities.get(asset.celebrity_name, 0)
+            if prior_uses == 0:
+                score += 75.0
+            else:
+                score -= 35.0 * prior_uses
 
         if prefer_type and asset.media_type == prefer_type:
             score += 15.0
@@ -402,66 +591,104 @@ def match_celebrity_asset(
 
 
 def _is_ai_or_non_photo(title: str, url: str) -> bool:
+    """Block AI-generated images, cartoons/vectors, AND paid/watermarked stock photos with labels."""
     combined = f'{title} {url}'.lower()
-    return any(term in combined for term in AI_BLOCKLIST)
+    return any(term in combined for term in AI_BLOCKLIST + WATERMARK_STOCK_BLOCKLIST)
 
 
-def search_web_real_photo(scene: dict, folder: Path, used: set[str] | None = None) -> dict | None:
-    """Real web photo fallback via DuckDuckGo Image Search (filters out AI art/illustrations)."""
+def item_matches_celebrities(text: str, celebrities: list[str] | None) -> bool:
+    """True when real image metadata (title/tags/url) clearly identifies one of the target celebrities."""
+    if not celebrities:
+        return True
+    norm_text = _norm_entity(text or '')
+    if not norm_text:
+        return False
+    text_tokens = set(norm_text.split())
+    for celeb in celebrities:
+        for variant in _celebrity_variants(celeb):
+            if _has_phrase(norm_text, variant):
+                return True
+            words = [w for w in variant.split() if len(w) >= 3]
+            if len(words) >= 2 and all(w in text_tokens for w in words):
+                return True
+    return False
+
+
+def search_web_real_photo(
+    scene: dict,
+    folder: Path,
+    used: set[str] | None = None,
+    target_celebrities: list[str] | None = None,
+) -> dict | None:
+    """Real web photo fallback via DuckDuckGo Image Search (celebrity-locked & filters watermarked stock/AI art)."""
     used = used or set()
+    targets = [c.strip() for c in (target_celebrities or []) if c and c.strip()]
     query = (scene.get('image_query') or scene.get('visual_description') or '').strip()
-    if not query:
+    if not query and not targets:
         return None
-    clean_q = re.sub(r'\s+', ' ', query)[:140] + ' real photo'
-    try:
-        from ddgs import DDGS
-        with DDGS() as ddgs:
-            results = list(ddgs.images(clean_q, max_results=12, type_image='photo', safesearch='moderate'))
-    except Exception:
-        return None
-
     scene_num = int(scene.get('number') or 1)
-    for item in results:
-        img_url = item.get('image') or ''
-        src_url = item.get('url') or img_url
-        title = item.get('title') or ''
-        if not img_url.startswith('http') or _is_ai_or_non_photo(title, img_url + ' ' + src_url):
-            continue
+    neg = '-getty -alamy -shutterstock -istock -dreamstime -depositphotos -123rf -watermark'
+    if targets:
+        # Query per celebrity discussed so we only surface real clean photographs of them.
+        queries = [(celeb, f'{celeb} press conference photo {neg}') for celeb in targets]
+    else:
+        compact_q = re.sub(r'\s+', ' ', query)[:120]
+        queries = [(None, f'{compact_q} real photo {neg}')]
+
+    for active_celeb, clean_q in queries:
         try:
-            resp = httpx.get(
-                img_url,
-                headers={'User-Agent': BROWSER_USER_AGENT, 'Accept': 'image/*'},
-                timeout=12,
-                follow_redirects=True,
-                trust_env=False,
-            )
-            if resp.status_code != 200 or len(resp.content) < 5000:
-                continue
-            with Image.open(io.BytesIO(resp.content)) as src_img:
-                src_img.load()
-                if src_img.width < 300 or src_img.height < 250:
-                    continue
-                img = ImageOps.exif_transpose(src_img).convert('RGB')
-            out_id = uuid4().hex[:12]
-            out_path = folder / f'web_{scene_num}_{out_id}.jpg'
-            img.save(out_path, 'JPEG', quality=94)
-            digest = hashlib.sha256(out_path.read_bytes()).hexdigest()
-            if digest in used:
-                out_path.unlink(missing_ok=True)
-                continue
-            return {
-                'path': str(out_path),
-                'hash': digest,
-                'source_url': src_url,
-                'creator': item.get('source') or 'Web Photograph',
-                'license': 'Editorial Web Photograph',
-                'license_url': src_url,
-                'credit': f'Photo via Web Search: {title[:80]}',
-                'kind': 'real_web_photo',
-                'media_type': 'image',
-                'provider': 'duckduckgo_photo',
-                'note': 'Real photograph retrieved from web search fallback.',
-            }
+            from ddgs import DDGS
+            with DDGS() as ddgs:
+                results = list(ddgs.images(clean_q, max_results=12, type_image='photo', safesearch='moderate'))
         except Exception:
             continue
+
+        match_scope = [active_celeb] if active_celeb else []
+        for item in results:
+            img_url = item.get('image') or ''
+            src_url = item.get('url') or img_url
+            title = item.get('title') or ''
+            src_name = item.get('source') or ''
+            if not img_url.startswith('http') or _is_ai_or_non_photo(f'{title} {src_name}', f'{img_url} {src_url}'):
+                continue
+            if match_scope and not item_matches_celebrities(f'{title} {src_url} {img_url}', match_scope):
+                continue
+            try:
+                resp = httpx.get(
+                    img_url,
+                    headers={'User-Agent': BROWSER_USER_AGENT, 'Accept': 'image/*'},
+                    timeout=12,
+                    follow_redirects=True,
+                    trust_env=False,
+                )
+                if resp.status_code != 200 or len(resp.content) < 5000:
+                    continue
+                with Image.open(io.BytesIO(resp.content)) as src_img:
+                    src_img.load()
+                    if src_img.width < 300 or src_img.height < 250:
+                        continue
+                    img = ImageOps.exif_transpose(src_img).convert('RGB')
+                out_id = uuid4().hex[:12]
+                out_path = folder / f'web_{scene_num}_{out_id}.jpg'
+                img.save(out_path, 'JPEG', quality=94)
+                digest = hashlib.sha256(out_path.read_bytes()).hexdigest()
+                if digest in used:
+                    out_path.unlink(missing_ok=True)
+                    continue
+                return {
+                    'path': str(out_path),
+                    'hash': digest,
+                    'source_url': src_url,
+                    'creator': item.get('source') or 'Web Photograph',
+                    'license': 'Editorial Web Photograph',
+                    'license_url': src_url,
+                    'credit': f'Photo via Web Search: {title[:80]}',
+                    'kind': 'real_web_photo',
+                    'media_type': 'image',
+                    'provider': 'duckduckgo_photo',
+                    **({'celebrity_name': active_celeb} if active_celeb else {}),
+                    'note': 'Real photograph retrieved from web search fallback.',
+                }
+            except Exception:
+                continue
     return None
