@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, mediaUrl } from "../services/api";
 import { rescanVaultWithFallback, useUploads } from "../context/UploadContext";
 import { mergeVaultLibraries } from "../utils/folderStore";
@@ -87,6 +87,8 @@ export default function CelebrityLibrary() {
   const [pcBrowserData, setPcBrowserData] = useState(null);
   const [pcBrowserLoading, setPcBrowserLoading] = useState(false);
   const [pcBrowserError, setPcBrowserError] = useState("");
+  const [visibleCelebCount, setVisibleCelebCount] = useState(12);
+  const [activeVideoId, setActiveVideoId] = useState(null);
   const folderInputRef = useRef(null);
 
   const supportsFolderPicker =
@@ -258,15 +260,23 @@ export default function CelebrityLibrary() {
     return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
   }
 
-  const effectiveLibrary = mergeVaultLibraries(library, localVaultIndex, getLocalPreviewUrl);
+  const effectiveLibrary = useMemo(
+    () => mergeVaultLibraries(library, localVaultIndex),
+    [library, localVaultIndex]
+  );
 
-  const filteredCelebrities = (effectiveLibrary?.celebrities || [])
-    .filter((c) => !query.trim() || c.celebrity_name.toLowerCase().includes(query.trim().toLowerCase()))
-    .map((c) => ({
-      ...c,
-      assets: c.assets.filter((a) => mediaFilter === "all" || a.media_type === mediaFilter),
-    }))
-    .filter((c) => c.assets.length > 0 || (mediaFilter === "all" && c.total_count > 0));
+  const filteredCelebrities = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return (effectiveLibrary?.celebrities || [])
+      .filter((c) => !q || c.celebrity_name.toLowerCase().includes(q))
+      .map((c) => ({
+        ...c,
+        assets: c.assets.filter((a) => mediaFilter === "all" || a.media_type === mediaFilter),
+      }))
+      .filter((c) => c.assets.length > 0 || (mediaFilter === "all" && c.total_count > 0));
+  }, [effectiveLibrary, query, mediaFilter]);
+
+  const displayedCelebrities = filteredCelebrities.slice(0, visibleCelebCount);
 
   const livePct =
     vaultJob?.phase === "checking" && vaultJob?.totalFiles > 0
@@ -604,7 +614,7 @@ export default function CelebrityLibrary() {
         />
       ) : (
         <div style={{ display: "grid", gap: 20 }}>
-          {filteredCelebrities.map((celeb) => (
+          {displayedCelebrities.map((celeb) => (
             <section key={celeb.celebrity_name} className="studio-card">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
                 <h3 style={{ margin: 0, fontSize: 16 }}>{celeb.celebrity_name}</h3>
@@ -614,31 +624,64 @@ export default function CelebrityLibrary() {
                 </div>
               </div>
               <div className="vault-media-grid">
-                {celeb.assets.map((asset) => {
-                  const previewSrc = mediaUrl(asset.local_blob_url || asset.preview_url);
+                {celeb.assets.slice(0, 6).map((asset) => {
+                  const isVideoActive = asset.media_type === "video" && activeVideoId === asset.id;
+                  const rawUrl =
+                    asset.media_type === "image" || isVideoActive
+                      ? asset.preview_url || (asset.relKey ? getLocalPreviewUrl(asset.relKey) : "")
+                      : "";
+                  const previewSrc = mediaUrl(rawUrl);
                   return (
                   <div key={asset.id} className="vault-asset-card">
                     <div className="vault-media-thumb">
-                      {!previewSrc ? (
+                      {asset.media_type === "video" ? (
+                        isVideoActive && previewSrc ? (
+                          <>
+                            <video
+                              src={previewSrc}
+                              controls
+                              autoPlay
+                              muted
+                              loop
+                              playsInline
+                              preload="metadata"
+                            />
+                            <span className="vault-duration-badge">
+                              {asset.duration ? `${asset.duration.toFixed(1)}s` : "CLIP"}
+                            </span>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setActiveVideoId(asset.id)}
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              width: "100%",
+                              height: "100%",
+                              gap: 6,
+                              color: "#475569",
+                              background: "transparent",
+                              border: "none",
+                              cursor: "pointer",
+                              fontSize: 12,
+                              fontWeight: 600,
+                            }}
+                          >
+                            <Film size={22} />
+                            <span>{asset.relKey || asset.preview_url ? "Click to preview clip" : "Indexed video"}</span>
+                            <span className="vault-duration-badge">
+                              {asset.duration ? `${asset.duration.toFixed(1)}s` : "CLIP"}
+                            </span>
+                          </button>
+                        )
+                      ) : !previewSrc ? (
                         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 6, color: "#64748b", fontSize: 12 }}>
-                          {asset.media_type === "video" ? <Film size={22} /> : <ImageIcon size={22} />}
-                          <span>Indexed {asset.media_type}</span>
+                          <ImageIcon size={22} />
+                          <span>Indexed image</span>
                         </div>
-                      ) : asset.media_type === "video" ? (
-                        <>
-                          <video
-                            src={previewSrc}
-                            muted
-                            loop
-                            playsInline
-                            preload="metadata"
-                            onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
-                            onMouseLeave={(e) => { e.currentTarget.pause(); e.currentTarget.currentTime = 0; }}
-                          />
-                          <span className="vault-duration-badge">
-                            {asset.duration ? `${asset.duration.toFixed(1)}s` : "CLIP"}
-                          </span>
-                        </>
                       ) : (
                         <img src={previewSrc} alt={asset.file_name} loading="lazy" />
                       )}
@@ -658,6 +701,16 @@ export default function CelebrityLibrary() {
               </div>
             </section>
           ))}
+          {filteredCelebrities.length > visibleCelebCount && (
+            <div style={{ display: "flex", justifyContent: "center", paddingTop: 4 }}>
+              <Button
+                variant="secondary"
+                onClick={() => setVisibleCelebCount((c) => c + 24)}
+              >
+                Show More Celebrities ({visibleCelebCount} of {filteredCelebrities.length})
+              </Button>
+            </div>
+          )}
         </div>
       )}
       {pcBrowserOpen && (

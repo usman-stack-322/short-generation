@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, mediaUrl } from '../services/api';
 import { useUploads } from '../context/UploadContext';
@@ -48,7 +48,10 @@ export default function TitleShort() {
     matchLocalFileForScene,
   } = useUploads();
   useEffect(()=>{api('/assets/library').then(setVaultLibrary).catch(()=>{});},[id, vaultVersion]);
-  const effectiveVaultLibrary = mergeVaultLibraries(vaultLibrary, localVaultIndex, getLocalPreviewUrl);
+  const effectiveVaultLibrary = useMemo(
+    () => mergeVaultLibraries(vaultLibrary, localVaultIndex),
+    [vaultLibrary, localVaultIndex]
+  );
   const [dirty,setDirty] = useState(false);
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState('');
@@ -732,11 +735,13 @@ export default function TitleShort() {
             ? <p>No celebrity assets indexed yet. Visit <Link to="/celebrity-library">Celebrity Folder</Link> to connect a folder.</p>
             : effectiveVaultLibrary.celebrities
                 .filter(c=>!vaultSearch.trim()||c.celebrity_name.toLowerCase().includes(vaultSearch.trim().toLowerCase()))
+                .slice(0, 20)
                 .map(c=><div key={c.celebrity_name} style={{marginTop:16}}>
                   <h4 style={{margin:'0 0 8px'}}>{c.celebrity_name} ({c.image_count} images · {c.video_count} clips)</h4>
                   <div className="vault-media-grid">
-                    {c.assets.map(a=>{
-                      const previewSrc = mediaUrl(a.local_blob_url || a.preview_url);
+                    {c.assets.slice(0, 6).map(a=>{
+                      const rawUrl = a.media_type === 'image' ? (a.preview_url || (a.relKey ? getLocalPreviewUrl(a.relKey) : '')) : '';
+                      const previewSrc = mediaUrl(rawUrl);
                       return (
                       <button
                         key={a.id}
@@ -754,10 +759,11 @@ export default function TitleShort() {
                       >
                         <div className="vault-media-thumb" style={{height:150}}>
                           {!previewSrc
-                            ? <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#64748b',fontSize:12}}>{a.media_type}</div>
-                            : a.media_type==='video'
-                            ? <video src={previewSrc} muted preload="metadata" />
-                            : <img src={previewSrc} alt={a.file_name} />}
+                            ? <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100%',gap:6,color:'#64748b',fontSize:12}}>
+                                {a.media_type === 'video' ? <Film size={20}/> : <ImageIcon size={20}/>}
+                                <span>Select {a.media_type}</span>
+                              </div>
+                            : <img src={previewSrc} alt={a.file_name} loading="lazy" />}
                         </div>
                         <div className="vault-asset-meta">
                           <strong>{a.file_name}</strong>

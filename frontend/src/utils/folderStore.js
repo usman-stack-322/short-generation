@@ -167,7 +167,7 @@ export function buildInstantVaultIndex(validItems, overrideCelebrity = "", prefe
     entry.total_count += 1;
     for (const m of moods) entry.moodSet.add(m);
 
-    if (entry.assets.length < 16) {
+    if (entry.assets.length < 8) {
       entry.assets.push({
         id: `local:${relKey}`,
         relKey,
@@ -207,19 +207,10 @@ export function buildInstantVaultIndex(validItems, overrideCelebrity = "", prefe
   };
 }
 
-export function mergeVaultLibraries(serverLib, localIndex, getLocalPreviewUrl) {
+export function mergeVaultLibraries(serverLib, localIndex) {
   if (!localIndex?.celebrities?.length) return serverLib;
   if (!serverLib?.celebrities?.length) {
-    return {
-      ...localIndex,
-      celebrities: localIndex.celebrities.map((c) => ({
-        ...c,
-        assets: (c.assets || []).map((a) => ({
-          ...a,
-          preview_url: (getLocalPreviewUrl && a.relKey && getLocalPreviewUrl(a.relKey)) || a.preview_url || "",
-        })),
-      })),
-    };
+    return localIndex;
   }
 
   const byName = new Map();
@@ -232,10 +223,7 @@ export function mergeVaultLibraries(serverLib, localIndex, getLocalPreviewUrl) {
 
   for (const lc of localIndex.celebrities) {
     const key = lc.celebrity_name.toLowerCase();
-    const localAssets = (lc.assets || []).map((a) => ({
-      ...a,
-      preview_url: (getLocalPreviewUrl && a.relKey && getLocalPreviewUrl(a.relKey)) || a.preview_url || "",
-    }));
+    const localAssets = lc.assets || [];
     const existing = byName.get(key);
     if (!existing) {
       byName.set(key, {
@@ -245,11 +233,11 @@ export function mergeVaultLibraries(serverLib, localIndex, getLocalPreviewUrl) {
     } else {
       const seenFiles = new Set(existing.assets.map((a) => (a.file_name || "").toLowerCase()));
       for (const la of localAssets) {
-        if (!seenFiles.has((la.file_name || "").toLowerCase()) && existing.assets.length < 16) {
+        if (!seenFiles.has((la.file_name || "").toLowerCase()) && existing.assets.length < 8) {
           existing.assets.push(la);
-        } else if (la.preview_url && la.preview_url.startsWith("blob:")) {
+        } else if (la.relKey) {
           const match = existing.assets.find((a) => (a.file_name || "").toLowerCase() === (la.file_name || "").toLowerCase());
-          if (match) match.local_blob_url = la.preview_url;
+          if (match && !match.relKey) match.relKey = la.relKey;
         }
       }
       existing.image_count = Math.max(existing.image_count || 0, lc.image_count || 0);

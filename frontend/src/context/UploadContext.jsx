@@ -111,96 +111,6 @@ export async function rescanVaultWithFallback({
   }
 }
 
-async function createCelebritySeedFile(item, celebrityName) {
-  const file = item?.file;
-  if (!file) return null;
-  const safeCeleb = String(celebrityName || item.celebrity_name || "Celebrity").replace(/[\\/:*?"<>|]/g, "").trim() || "Celebrity";
-  const baseStem = String(item.file_name || file.name || "seed").replace(/\.[^.]+$/, "");
-
-  if (item.media_type === "image") {
-    try {
-      if (typeof createImageBitmap === "function") {
-        const bmp = await createImageBitmap(file);
-        const maxDim = 960;
-        const scale = Math.min(1, maxDim / Math.max(bmp.width || 1, bmp.height || 1));
-        const w = Math.max(1, Math.round((bmp.width || 640) * scale));
-        const h = Math.max(1, Math.round((bmp.height || 640) * scale));
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        canvas.getContext("2d").drawImage(bmp, 0, 0, w, h);
-        bmp.close?.();
-        const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.78));
-        if (blob && blob.size > 0) {
-          return {
-            file: new File([blob], `${baseStem}.jpg`, { type: "image/jpeg" }),
-            relPath: `${safeCeleb}/${baseStem}.jpg`,
-          };
-        }
-      }
-    } catch {}
-    if (file.size <= 800 * 1024) {
-      return { file, relPath: `${safeCeleb}/${file.name}` };
-    }
-    return null;
-  }
-
-  // Video clip: grab a lightweight 960px JPEG frame in ~100ms so the server indexes this celebrity immediately
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(file);
-    const video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    video.preload = "metadata";
-    const cleanup = () => {
-      try { URL.revokeObjectURL(url); } catch {}
-    };
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve(null);
-    }, 2200);
-    video.onloadeddata = () => {
-      video.currentTime = Math.min(0.4, (video.duration || 1) * 0.1);
-    };
-    video.onseeked = () => {
-      clearTimeout(timer);
-      try {
-        const vw = video.videoWidth || 640;
-        const vh = video.videoHeight || 360;
-        const scale = Math.min(1, 960 / Math.max(vw, vh));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(vw * scale));
-        canvas.height = Math.max(1, Math.round(vh * scale));
-        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-        canvas.toBlob(
-          (blob) => {
-            cleanup();
-            if (blob && blob.size > 0) {
-              resolve({
-                file: new File([blob], `${baseStem}.jpg`, { type: "image/jpeg" }),
-                relPath: `${safeCeleb}/${baseStem}.jpg`,
-              });
-            } else {
-              resolve(null);
-            }
-          },
-          "image/jpeg",
-          0.78
-        );
-      } catch {
-        cleanup();
-        resolve(null);
-      }
-    };
-    video.onerror = () => {
-      clearTimeout(timer);
-      cleanup();
-      resolve(null);
-    };
-    video.src = url;
-  });
-}
-
 export function UploadProvider({ children }) {
   const [vaultJob, setVaultJob] = useState(null);
   const [libraryJob, setLibraryJob] = useState(null);
@@ -227,7 +137,7 @@ export function UploadProvider({ children }) {
         if (idx) setLocalVaultIndex((cur) => cur || idx);
       })
       .catch(() => {});
-  }, [vaultVersion]);
+  }, []);
 
   const getLocalPreviewUrl = useCallback((relKey) => {
     if (!relKey) return "";
@@ -236,6 +146,16 @@ export function UploadProvider({ children }) {
     const file = localFilesMapRef.current.get(relKey);
     if (!file) return "";
     try {
+      if (blobUrlCacheRef.current.size >= 60) {
+        const oldestKey = blobUrlCacheRef.current.keys().next().value;
+        const oldestUrl = blobUrlCacheRef.current.get(oldestKey);
+        if (oldestUrl) {
+          try {
+            URL.revokeObjectURL(oldestUrl);
+          } catch {}
+        }
+        blobUrlCacheRef.current.delete(oldestKey);
+      }
       const url = URL.createObjectURL(file);
       blobUrlCacheRef.current.set(relKey, url);
       return url;
@@ -389,55 +309,6 @@ export function UploadProvider({ children }) {
         startedAt,
         message: `Done in ${elapsedMs}ms! Indexed ${index.total_assets.toLocaleString()} clips across ${index.celebrities.length.toLocaleString()} celebrities — saved & ready for Shorts.`,
       });
-
-      // Quietly seed 1 compressed (~35 KB) representative image per celebrity to the backend so server-side AI script & scene matching also knows every celebrity
-      (async () => {
-        try {
-          const cachedManifest = await getCachedVaultManifest(wsCacheKey);
-          const seedBatch = [];
-          for (const [, items] of filesByCelebrity.entries()) {
-            if (controller.signal.aborted) return;
-            const preferred = items.find((it) => it.media_type === "image") || items[0];
-            if (!preferred) continue;
-            const seedKey = `seed:${preferred.celebrity_name.toLowerCase()}`;
-            if (cachedManifest[seedKey]) continue;
-            const seedItem = await createCelebritySeedFile(preferred, preferred.celebrity_name);
-            if (seedItem) {
-              seedBatch.push({ ...seedItem, seedKey });
-            }
-          }
-          if (!seedBatch.length || controller.signal.aborted) return;
-
-          let serverFolderPath = "";
-          const CHUNK = 25;
-          for (let i = 0; i < seedBatch.length; i += CHUNK) {
-            if (controller.signal.aborted) return;
-            const slice = seedBatch.slice(i, i + CHUNK);
-            const fd = new FormData();
-            fd.append("celebrity_name", "");
-            fd.append("skip_scan", "true");
-            fd.append("skip_existing", "true");
-            fd.append("defer_index", "true");
-            for (const s of slice) {
-              fd.append("files", s.file, s.relPath);
-            }
-            const res = await apiUpload("/assets/upload-bulk", fd, {
-              workspaceId,
-              signal: controller.signal,
-            });
-            if (res?.folder_path) serverFolderPath = res.folder_path;
-            for (const s of slice) cachedManifest[s.seedKey] = 1;
-          }
-          saveCachedVaultManifest(wsCacheKey, cachedManifest);
-          await rescanVaultWithFallback({
-            workspaceId,
-            preference,
-            signal: controller.signal,
-            fallbackFolderPath: serverFolderPath,
-          });
-          setVaultVersion((v) => v + 1);
-        } catch {}
-      })();
     } catch (err) {
       const isCancelled = err?.name === "AbortError" || controller.signal.aborted;
       const errDetail = err?.path ? `${err?.message || "Sync failed."} (${err.status || "error"} · ${err.path})` : (err?.message || "Sync failed.");
