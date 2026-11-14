@@ -1,6 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, mediaUrl } from '../services/api';
+import { useUploads } from '../context/UploadContext';
+import { mergeVaultLibraries } from '../utils/folderStore';
 import { PageHeader } from '../components/Shell';
 import { Button } from '../components/UI';
 import { Copy, FileText, Film, FolderOpen, Image as ImageIcon, Search, Trash2, Upload } from 'lucide-react';
@@ -38,7 +40,15 @@ export default function TitleShort() {
   const [vaultLibrary,setVaultLibrary] = useState(null);
   const [vaultPickerScene,setVaultPickerScene] = useState(null);
   const [vaultSearch,setVaultSearch] = useState('');
-  useEffect(()=>{api('/assets/library').then(setVaultLibrary).catch(()=>{});},[id]);
+  const {
+    vaultVersion,
+    localVaultIndex,
+    getLocalPreviewUrl,
+    getLocalFile,
+    matchLocalFileForScene,
+  } = useUploads();
+  useEffect(()=>{api('/assets/library').then(setVaultLibrary).catch(()=>{});},[id, vaultVersion]);
+  const effectiveVaultLibrary = mergeVaultLibraries(vaultLibrary, localVaultIndex, getLocalPreviewUrl);
   const [dirty,setDirty] = useState(false);
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState('');
@@ -89,15 +99,45 @@ export default function TitleShort() {
     return()=>{live=false;clearInterval(timer);};
   },[draft?.id,draft?.status]);
 
-  // Automatically fetch online visuals for scenes in script_review when missing.
+  // Automatically attach local Celebrity Folder clips/photos on-demand and fetch remaining visuals in script_review.
   useEffect(()=>{
     if(!draft||draft.status!=='script_review'||draft.media_mode==='local'||draft.error_message||busy)return;
     if(!draft.scenes?.some(s=>!s.preview_url))return;
     const key=draft.id+':'+draft.revision;
     if(visualsRequested.current.has(key))return;
     visualsRequested.current.add(key);
-    action('/'+draft.id+'/visuals',{revision:draft.revision});
-  },[draft?.id,draft?.status,draft?.revision,draft?.media_mode,draft?.error_message,busy]);
+
+    (async () => {
+      try {
+        const usedRels = new Set();
+        let latestDraft = draft;
+        for (const sc of draft.scenes || []) {
+          if (sc.preview_url) continue;
+          const matched = matchLocalFileForScene(
+            sc,
+            [draft.title],
+            draft.media_preference || 'mix_both',
+            usedRels
+          );
+          if (matched?.file && matched.file.size <= 95 * 1024 * 1024) {
+            usedRels.add(matched.relKey);
+            try {
+              const fd = new FormData();
+              fd.append('file', matched.file);
+              latestDraft = await api('/projects/' + draft.id + '/scenes/' + sc.number + '/upload-media', {
+                method: 'POST',
+                body: fd,
+              });
+              setDraft(latestDraft);
+            } catch {}
+          }
+        }
+        if (latestDraft?.scenes?.some((s) => !s.preview_url)) {
+          await action('/' + draft.id + '/visuals', { revision: latestDraft.revision });
+        }
+      } catch {}
+    })();
+  },[draft?.id,draft?.status,draft?.revision,draft?.media_mode,draft?.error_message,busy,matchLocalFileForScene]);
 
   async function uploadSceneMedia(sceneNumber, file, vaultAssetId='') {
     setBusy(true); setError('');
@@ -688,26 +728,44 @@ export default function TitleShort() {
               <input style={{paddingLeft:36}} placeholder="Filter celebrities..." value={vaultSearch} onChange={e=>setVaultSearch(e.target.value)} />
             </div>
           </div>
-          {!vaultLibrary?.celebrities?.length
+          {!effectiveVaultLibrary?.celebrities?.length
             ? <p>No celebrity assets indexed yet. Visit <Link to="/celebrity-library">Celebrity Folder</Link> to connect a folder.</p>
-            : vaultLibrary.celebrities
+            : effectiveVaultLibrary.celebrities
                 .filter(c=>!vaultSearch.trim()||c.celebrity_name.toLowerCase().includes(vaultSearch.trim().toLowerCase()))
                 .map(c=><div key={c.celebrity_name} style={{marginTop:16}}>
                   <h4 style={{margin:'0 0 8px'}}>{c.celebrity_name} ({c.image_count} images · {c.video_count} clips)</h4>
                   <div className="vault-media-grid">
-                    {c.assets.map(a=>(
-                      <button key={a.id} type="button" className="vault-asset-card" style={{textAlign:'left',cursor:'pointer',padding:0}} onClick={()=>uploadSceneMedia(vaultPickerScene,null,a.id)}>
+                    {c.assets.map(a=>{
+                      const previewSrc = mediaUrl(a.local_blob_url || a.preview_url);
+                      return (
+                      <button
+                        key={a.id}
+                        type="button"
+                        className="vault-asset-card"
+                        style={{textAlign:'left',cursor:'pointer',padding:0}}
+                        onClick={()=>{
+                          const localFile = a.relKey ? getLocalFile(a.relKey) : null;
+                          if (localFile) {
+                            uploadSceneMedia(vaultPickerScene, localFile, '');
+                          } else if (a.id && !String(a.id).startsWith('local:')) {
+                            uploadSceneMedia(vaultPickerScene, null, a.id);
+                          }
+                        }}
+                      >
                         <div className="vault-media-thumb" style={{height:150}}>
-                          {a.media_type==='video'
-                            ? <video src={mediaUrl(a.preview_url)} muted preload="metadata" />
-                            : <img src={mediaUrl(a.preview_url)} alt={a.file_name} />}
+                          {!previewSrc
+                            ? <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#64748b',fontSize:12}}>{a.media_type}</div>
+                            : a.media_type==='video'
+                            ? <video src={previewSrc} muted preload="metadata" />
+                            : <img src={previewSrc} alt={a.file_name} />}
                         </div>
                         <div className="vault-asset-meta">
                           <strong>{a.file_name}</strong>
                           <span className="mood-tag" style={{marginTop:4,display:'inline-block'}}>{a.media_type}</span>
                         </div>
                       </button>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>)}
         </div>

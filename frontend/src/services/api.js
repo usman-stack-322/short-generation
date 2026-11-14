@@ -5,7 +5,9 @@ const rawApiRoot = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API
 const API_ROOT = rawApiRoot.replace(/\/+$/, "");
 
 export function mediaUrl(path) {
-  return path ? `${API_ROOT}${path}` : "";
+  if (!path) return "";
+  if (/^(blob:|data:|https?:\/\/)/i.test(path)) return path;
+  return `${API_ROOT}${path}`;
 }
 
 function formatApiError(body, status) {

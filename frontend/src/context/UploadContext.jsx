@@ -2,13 +2,17 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { CheckCircle2, FolderUp, Loader2, Minimize2, Maximize2, X, XCircle } from "lucide-react";
 import { api, apiUpload } from "../services/api";
 import {
+  buildInstantVaultIndex,
   canonicalVaultRel,
+  clearLocalVaultIndex,
   clearSavedDirectoryHandle,
   ensureDirectoryPermission,
   getCachedVaultManifest,
+  getLocalVaultIndex,
   getSavedDirectoryHandle,
   saveCachedVaultManifest,
   saveDirectoryHandle,
+  saveLocalVaultIndex,
   walkDirectoryHandleParallel,
 } from "../utils/folderStore";
 
@@ -107,6 +111,96 @@ export async function rescanVaultWithFallback({
   }
 }
 
+async function createCelebritySeedFile(item, celebrityName) {
+  const file = item?.file;
+  if (!file) return null;
+  const safeCeleb = String(celebrityName || item.celebrity_name || "Celebrity").replace(/[\\/:*?"<>|]/g, "").trim() || "Celebrity";
+  const baseStem = String(item.file_name || file.name || "seed").replace(/\.[^.]+$/, "");
+
+  if (item.media_type === "image") {
+    try {
+      if (typeof createImageBitmap === "function") {
+        const bmp = await createImageBitmap(file);
+        const maxDim = 960;
+        const scale = Math.min(1, maxDim / Math.max(bmp.width || 1, bmp.height || 1));
+        const w = Math.max(1, Math.round((bmp.width || 640) * scale));
+        const h = Math.max(1, Math.round((bmp.height || 640) * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(bmp, 0, 0, w, h);
+        bmp.close?.();
+        const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.78));
+        if (blob && blob.size > 0) {
+          return {
+            file: new File([blob], `${baseStem}.jpg`, { type: "image/jpeg" }),
+            relPath: `${safeCeleb}/${baseStem}.jpg`,
+          };
+        }
+      }
+    } catch {}
+    if (file.size <= 800 * 1024) {
+      return { file, relPath: `${safeCeleb}/${file.name}` };
+    }
+    return null;
+  }
+
+  // Video clip: grab a lightweight 960px JPEG frame in ~100ms so the server indexes this celebrity immediately
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    const cleanup = () => {
+      try { URL.revokeObjectURL(url); } catch {}
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 2200);
+    video.onloadeddata = () => {
+      video.currentTime = Math.min(0.4, (video.duration || 1) * 0.1);
+    };
+    video.onseeked = () => {
+      clearTimeout(timer);
+      try {
+        const vw = video.videoWidth || 640;
+        const vh = video.videoHeight || 360;
+        const scale = Math.min(1, 960 / Math.max(vw, vh));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(vw * scale));
+        canvas.height = Math.max(1, Math.round(vh * scale));
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(
+          (blob) => {
+            cleanup();
+            if (blob && blob.size > 0) {
+              resolve({
+                file: new File([blob], `${baseStem}.jpg`, { type: "image/jpeg" }),
+                relPath: `${safeCeleb}/${baseStem}.jpg`,
+              });
+            } else {
+              resolve(null);
+            }
+          },
+          "image/jpeg",
+          0.78
+        );
+      } catch {
+        cleanup();
+        resolve(null);
+      }
+    };
+    video.onerror = () => {
+      clearTimeout(timer);
+      cleanup();
+      resolve(null);
+    };
+    video.src = url;
+  });
+}
+
 export function UploadProvider({ children }) {
   const [vaultJob, setVaultJob] = useState(null);
   const [libraryJob, setLibraryJob] = useState(null);
@@ -114,16 +208,107 @@ export function UploadProvider({ children }) {
   const [libraryVersion, setLibraryVersion] = useState(0);
   const [minimized, setMinimized] = useState(false);
   const [savedFolder, setSavedFolder] = useState(null);
+  const [localVaultIndex, setLocalVaultIndex] = useState(null);
 
   const vaultAbortRef = useRef(null);
   const libraryAbortRef = useRef(null);
+  const localFilesMapRef = useRef(new Map());
+  const localByCelebrityRef = useRef(new Map());
+  const blobUrlCacheRef = useRef(new Map());
 
   const workspaceKey = () => localStorage.getItem("workspace_id") || JSON.parse(localStorage.getItem("user") || "{}").id || "default";
 
   useEffect(() => {
     if (!localStorage.getItem("token")) return;
-    getSavedDirectoryHandle(workspaceKey()).then(setSavedFolder).catch(() => {});
+    const wsKey = workspaceKey();
+    getSavedDirectoryHandle(wsKey).then(setSavedFolder).catch(() => {});
+    getLocalVaultIndex(wsKey)
+      .then((idx) => {
+        if (idx) setLocalVaultIndex((cur) => cur || idx);
+      })
+      .catch(() => {});
   }, [vaultVersion]);
+
+  const getLocalPreviewUrl = useCallback((relKey) => {
+    if (!relKey) return "";
+    const cached = blobUrlCacheRef.current.get(relKey);
+    if (cached) return cached;
+    const file = localFilesMapRef.current.get(relKey);
+    if (!file) return "";
+    try {
+      const url = URL.createObjectURL(file);
+      blobUrlCacheRef.current.set(relKey, url);
+      return url;
+    } catch {
+      return "";
+    }
+  }, []);
+
+  const getLocalFile = useCallback((relKey) => {
+    if (!relKey) return null;
+    return localFilesMapRef.current.get(relKey) || null;
+  }, []);
+
+  const matchLocalFileForScene = useCallback((scene, people = [], preference = "mix_both", usedRelKeys = new Set()) => {
+    const byCeleb = localByCelebrityRef.current;
+    if (!byCeleb || byCeleb.size === 0) return null;
+    const haystack = [
+      scene?.image_query || "",
+      scene?.visual_description || "",
+      scene?.on_screen_text || "",
+      scene?.narration || "",
+      ...(people || []),
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    const sceneNum = Number(scene?.number || 1);
+    const preferType =
+      preference === "prefer_clips"
+        ? "video"
+        : preference === "prefer_images"
+        ? "image"
+        : sceneNum % 2 === 1
+        ? "video"
+        : "image";
+
+    let bestItem = null;
+    let bestScore = -1;
+
+    for (const [celebLow, items] of byCeleb.entries()) {
+      const tokens = celebLow.split(/\s+/).filter((t) => t.length >= 3);
+      if (!tokens.length) continue;
+      let celebScore = 0;
+      if (haystack.includes(celebLow)) {
+        celebScore = 200;
+      } else if (tokens.length >= 2 && tokens.every((t) => haystack.includes(t))) {
+        celebScore = 150;
+      } else if (tokens.length >= 2 && haystack.includes(tokens[tokens.length - 1])) {
+        celebScore = 95;
+      }
+      if (celebScore <= 0) continue;
+
+      for (const item of items) {
+        let score = celebScore;
+        if (item.media_type === preferType) score += 20;
+        for (const m of item.mood_tags || []) {
+          if (haystack.includes(m)) score += 15;
+        }
+        // Prefer clips under 35 MB for instant scene attach
+        if (item.media_type === "video" && item.file?.size > 35 * 1024 * 1024) {
+          score -= 25;
+        }
+        if (usedRelKeys.has(item.relKey)) {
+          score -= 500;
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestItem = item;
+        }
+      }
+    }
+    return bestScore > 0 ? bestItem : null;
+  }, []);
 
   const activeJobs = [vaultJob, libraryJob].filter(
     (j) => j && ["scanning", "checking", "uploading", "indexing"].includes(j.phase)
@@ -150,8 +335,17 @@ export function UploadProvider({ children }) {
   }, []);
 
   const forgetSavedFolder = useCallback(async () => {
-    await clearSavedDirectoryHandle(workspaceKey());
+    const wsKey = workspaceKey();
+    await clearSavedDirectoryHandle(wsKey);
+    await clearLocalVaultIndex(wsKey);
+    for (const url of blobUrlCacheRef.current.values()) {
+      try { URL.revokeObjectURL(url); } catch {}
+    }
+    blobUrlCacheRef.current.clear();
+    localFilesMapRef.current.clear();
+    localByCelebrityRef.current.clear();
     setSavedFolder(null);
+    setLocalVaultIndex(null);
   }, []);
 
   const dismissVaultJob = useCallback(() => {
@@ -163,337 +357,23 @@ export function UploadProvider({ children }) {
   }, []);
 
   const executeVaultItems = useCallback(async (valid, { celebrityName = "", preference = "mix_both", controller, startedAt, workspaceId }) => {
-    let uploadedFilesCount = 0;
     const wsCacheKey = workspaceId || workspaceKey();
-    let existingMap = {};
-    let serverFolderPath = "";
     try {
-      setVaultJob({
-        id: startedAt,
-        title: "Celebrity Clips Sync",
-        phase: "checking",
-        checkedFiles: 0,
-        totalFiles: valid.length,
-        uploadedFiles: 0,
-        skippedFiles: 0,
-        totalBytes: 0,
-        loadedBytes: 0,
-        speedBps: 0,
-        startedAt,
-        message: `Checking clips 0 / ${valid.length}…`,
-      });
+      const t0 = performance.now();
+      const { index, filesByRelKey, filesByCelebrity } = buildInstantVaultIndex(valid, celebrityName, preference);
 
-      // Fast compressed O(1) manifest comparison + local IndexedDB cache fallback if backend lacks /assets/manifest
-      const cachedManifest = await getCachedVaultManifest(wsCacheKey);
-      existingMap = { ...cachedManifest };
-      let chunkEndpointMissing = false;
-      try {
-        const manifestRes = await api("/assets/manifest", {
-          signal: controller.signal,
-          headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
-        });
-        existingMap = { ...(manifestRes?.files || {}) };
-        serverFolderPath = manifestRes?.folder_path || "";
-        saveCachedVaultManifest(wsCacheKey, existingMap);
-      } catch (manifestErr) {
-        if (manifestErr?.name === "AbortError" || controller.signal.aborted) throw manifestErr;
-        if (manifestErr?.status !== 404) throw manifestErr;
-        chunkEndpointMissing = true;
+      for (const url of blobUrlCacheRef.current.values()) {
+        try { URL.revokeObjectURL(url); } catch {}
       }
-      const toUpload = [];
-      let skippedCount = 0;
+      blobUrlCacheRef.current.clear();
+      localFilesMapRef.current = filesByRelKey;
+      localByCelebrityRef.current = filesByCelebrity;
+      setLocalVaultIndex(index);
+      saveLocalVaultIndex(wsCacheKey, index);
 
-      const STEP = 500;
-      for (let i = 0; i < valid.length; i++) {
-        if (controller.signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
-        const item = valid[i];
-        const relKey = canonicalVaultRel(item.relPath || item.file.webkitRelativePath || item.file.name, celebrityName);
-        item.relKey = relKey;
-        const remoteSize = existingMap[relKey];
-        if (remoteSize && remoteSize === item.file.size) {
-          skippedCount++;
-        } else {
-          toUpload.push(item);
-        }
-        if ((i + 1) % STEP === 0 || i === valid.length - 1) {
-          const checked = i + 1;
-          setVaultJob((cur) => cur && cur.id === startedAt ? {
-            ...cur,
-            phase: "checking",
-            checkedFiles: checked,
-            totalFiles: valid.length,
-            skippedFiles: skippedCount,
-            message: `Checking clips ${checked} / ${valid.length}`,
-          } : cur);
-          if (i < valid.length - 1) {
-            await new Promise((r) => setTimeout(r, 0));
-          }
-        }
-      }
+      const totalBytes = valid.reduce((sum, x) => sum + (x.file?.size || 0), 0);
+      const elapsedMs = Math.max(12, Math.round(performance.now() - t0));
 
-      if (toUpload.length === 0) {
-        setVaultJob((cur) => cur && {
-          ...cur,
-          phase: "indexing",
-          skippedFiles: skippedCount,
-          message: `All ${skippedCount} clips verified — refreshing index…`,
-        });
-        const scan = await rescanVaultWithFallback({
-          workspaceId,
-          preference,
-          signal: controller.signal,
-          fallbackFolderPath: serverFolderPath,
-        });
-        const totalIndexed = typeof scan?.total_assets === "number" ? scan.total_assets : skippedCount;
-        setVaultVersion((v) => v + 1);
-        setVaultJob({
-          id: startedAt,
-          title: "Celebrity Clips Sync",
-          phase: "done",
-          checkedFiles: valid.length,
-          totalFiles: valid.length,
-          uploadedFiles: 0,
-          skippedFiles: skippedCount,
-          totalBytes: 0,
-          loadedBytes: 0,
-          speedBps: 0,
-          startedAt,
-          message: `All ${skippedCount.toLocaleString()} clips already up to date (${totalIndexed.toLocaleString()} total indexed).`,
-        });
-        return;
-      }
-
-      // Sort smallest files first so photos and short clips finish in seconds while larger videos stream next
-      const sortedToUpload = [...toUpload].sort((a, b) => (a.file.size || 0) - (b.file.size || 0));
-      const smallItems = [];
-      const largeItems = [];
-      for (const item of sortedToUpload) {
-        if ((item.file.size || 0) > LARGE_FILE_THRESHOLD) {
-          largeItems.push(item);
-        } else {
-          smallItems.push(item);
-        }
-      }
-      const uploadTasks = [
-        ...buildBatches(smallItems).map((batch) => ({ kind: "batch", items: batch })),
-        ...largeItems.map((item) => ({ kind: "chunked", item })),
-      ];
-      const totalUploadBytes = sortedToUpload.reduce((sum, x) => sum + (x.file.size || 0), 0);
-      const taskLoaded = new Array(uploadTasks.length).fill(0);
-      const taskTotals = uploadTasks.map((t) =>
-        t.kind === "batch"
-          ? t.items.reduce((sum, x) => sum + (x.file.size || 0), 0)
-          : t.item.file.size || 0
-      );
-      let nextTaskIndex = 0;
-      let skippedOnServer = 0;
-      let lastUiTick = 0;
-      let lastLiveRefreshMs = Date.now();
-      let lastCacheSaveMs = Date.now();
-      let lastRefreshedCount = 0;
-      const uploadStartMs = Date.now();
-
-      const markUploadedInCache = (items) => {
-        for (const it of items) {
-          const key = it.relKey || canonicalVaultRel(it.relPath || it.file.webkitRelativePath || it.file.name, celebrityName);
-          if (key && it.file?.size > 0) {
-            existingMap[key] = it.file.size;
-          }
-        }
-        const now = Date.now();
-        if (now - lastCacheSaveMs > 4000) {
-          lastCacheSaveMs = now;
-          saveCachedVaultManifest(wsCacheKey, existingMap);
-        }
-      };
-
-      const updateProgress = (force = false) => {
-        const now = Date.now();
-        if (!force && now - lastUiTick < 120) return;
-        lastUiTick = now;
-        if (uploadedFilesCount > lastRefreshedCount && now - lastLiveRefreshMs > 15000) {
-          lastLiveRefreshMs = now;
-          lastRefreshedCount = uploadedFilesCount;
-          setVaultVersion((v) => v + 1);
-        }
-        const loaded = Math.min(
-          totalUploadBytes,
-          taskLoaded.reduce((a, b) => a + b, 0)
-        );
-        const elapsedSec = Math.max(0.2, (now - uploadStartMs) / 1000);
-        const speedBps = loaded / elapsedSec;
-        const remainingBytes = Math.max(0, totalUploadBytes - loaded);
-        const etaSec = speedBps > 1024 ? remainingBytes / speedBps : 0;
-        const etaLabel = formatEta(etaSec);
-        setVaultJob((cur) => {
-          if (!cur || cur.id !== startedAt) return cur;
-          return {
-            ...cur,
-            phase: "uploading",
-            checkedFiles: valid.length,
-            totalFiles: valid.length,
-            newFilesTotal: sortedToUpload.length,
-            uploadedFiles: uploadedFilesCount,
-            skippedFiles: skippedCount + skippedOnServer,
-            totalBytes: totalUploadBytes,
-            loadedBytes: loaded,
-            speedBps,
-            etaSec,
-            message: `Uploading clips ${uploadedFilesCount.toLocaleString()}/${sortedToUpload.length.toLocaleString()}${skippedCount ? ` · ${skippedCount.toLocaleString()} already saved skipped` : ""}${etaLabel ? ` · ${etaLabel}` : ""}`,
-          };
-        });
-      };
-
-      updateProgress(true);
-
-      const uploadBulkBatch = (taskIdx, batch) =>
-        runWithRetry(async () => {
-          const fd = new FormData();
-          fd.append("celebrity_name", celebrityName);
-          fd.append("skip_scan", "true");
-          fd.append("skip_existing", "true");
-          fd.append("defer_index", "true");
-          for (const { file, relPath } of batch) {
-            fd.append("files", file, relPath || file.webkitRelativePath || file.name);
-          }
-          return apiUpload("/assets/upload-bulk", fd, {
-            workspaceId,
-            signal: controller.signal,
-            onProgress: (loaded, total) => {
-              taskLoaded[taskIdx] = Math.min(loaded, total || taskTotals[taskIdx]);
-              updateProgress(false);
-            },
-          });
-        }, controller.signal);
-
-      const uploadChunkedLargeFile = async (taskIdx, item) => {
-        if (chunkEndpointMissing) {
-          return uploadBulkBatch(taskIdx, [item]);
-        }
-        const { file, relPath } = item;
-        const totalSize = file.size || 0;
-        const totalChunks = Math.max(1, Math.ceil(totalSize / CHUNK_BYTES));
-        const uploadId = `${Date.now().toString(36)}_${taskIdx}_${Math.random().toString(36).slice(2, 10)}`;
-        const resolvedRel = relPath || file.webkitRelativePath || file.name;
-        const chunkLoaded = new Array(totalChunks).fill(0);
-
-        const syncChunkProgress = (force = false) => {
-          taskLoaded[taskIdx] = Math.min(
-            totalSize,
-            chunkLoaded.reduce((a, b) => a + b, 0)
-          );
-          updateProgress(force);
-        };
-
-        const sendSingleChunk = async (chunkIdx) => {
-          const start = chunkIdx * CHUNK_BYTES;
-          const end = Math.min(totalSize, start + CHUNK_BYTES);
-          const slice = file.slice(start, end);
-          const res = await runWithRetry(async () => {
-            const fd = new FormData();
-            fd.append("relative_path", resolvedRel);
-            fd.append("celebrity_name", celebrityName);
-            fd.append("upload_id", uploadId);
-            fd.append("chunk_index", String(chunkIdx));
-            fd.append("total_chunks", String(totalChunks));
-            fd.append("total_size", String(totalSize));
-            fd.append("file", slice, file.name);
-            return apiUpload("/assets/upload-chunk", fd, {
-              workspaceId,
-              signal: controller.signal,
-              onProgress: (loaded) => {
-                chunkLoaded[chunkIdx] = Math.min(end - start, loaded);
-                syncChunkProgress(false);
-              },
-            });
-          }, controller.signal);
-          chunkLoaded[chunkIdx] = end - start;
-          syncChunkProgress(false);
-          return res;
-        };
-
-        try {
-          // Send chunk 0 first to detect 404 or server-side deduplication before parallelizing middle chunks
-          const firstRes = await sendSingleChunk(0);
-          if (firstRes?.skipped || totalChunks === 1) {
-            taskLoaded[taskIdx] = totalSize;
-            return firstRes;
-          }
-
-          if (totalChunks > 2) {
-            let nextMiddleIdx = 1;
-            const lastMiddleIdx = totalChunks - 2;
-            const middleWorkerCount = Math.min(CHUNK_CONCURRENCY, lastMiddleIdx);
-            await Promise.all(
-              Array.from({ length: middleWorkerCount }, async () => {
-                while (!controller.signal.aborted) {
-                  const cIdx = nextMiddleIdx++;
-                  if (cIdx > lastMiddleIdx) return;
-                  await sendSingleChunk(cIdx);
-                }
-              })
-            );
-          }
-
-          if (controller.signal.aborted) return firstRes;
-          // Send final chunk last so server assembly triggers cleanly once all prior chunks exist
-          return await sendSingleChunk(totalChunks - 1);
-        } catch (chunkErr) {
-          if (chunkErr?.status === 404) {
-            chunkEndpointMissing = true;
-            taskLoaded[taskIdx] = 0;
-            return uploadBulkBatch(taskIdx, [item]);
-          }
-          throw chunkErr;
-        }
-      };
-
-      const worker = async () => {
-        while (true) {
-          if (controller.signal.aborted) return;
-          const idx = nextTaskIndex++;
-          if (idx >= uploadTasks.length) return;
-          const task = uploadTasks[idx];
-
-          let res;
-          if (task.kind === "chunked") {
-            res = await uploadChunkedLargeFile(idx, task.item);
-            taskLoaded[idx] = taskTotals[idx];
-            uploadedFilesCount += res?.saved ?? 1;
-            skippedOnServer += res?.skipped ?? 0;
-            markUploadedInCache([task.item]);
-          } else {
-            const batch = task.items;
-            res = await uploadBulkBatch(idx, batch);
-            taskLoaded[idx] = taskTotals[idx];
-            uploadedFilesCount += res?.saved ?? batch.length;
-            skippedOnServer += res?.skipped ?? 0;
-            markUploadedInCache(batch);
-          }
-          if (res?.folder_path) serverFolderPath = res.folder_path;
-          updateProgress(true);
-        }
-      };
-
-      const workerCount = Math.min(VAULT_CONCURRENCY, uploadTasks.length);
-      await Promise.all(Array.from({ length: workerCount }, () => worker()));
-      saveCachedVaultManifest(wsCacheKey, existingMap);
-
-      setVaultJob((cur) => cur && {
-        ...cur,
-        phase: "indexing",
-        loadedBytes: totalUploadBytes,
-        message: "Finalizing library index…",
-      });
-      const scan = await rescanVaultWithFallback({
-        workspaceId,
-        preference,
-        fallbackFolderPath: serverFolderPath,
-      });
-      const totalIndexedCount =
-        typeof scan?.total_assets === "number"
-          ? scan.total_assets
-          : uploadedFilesCount + skippedCount + skippedOnServer;
       setVaultVersion((v) => v + 1);
       setVaultJob({
         id: startedAt,
@@ -501,38 +381,72 @@ export function UploadProvider({ children }) {
         phase: "done",
         checkedFiles: valid.length,
         totalFiles: valid.length,
-        uploadedFiles: uploadedFilesCount,
-        skippedFiles: skippedCount + skippedOnServer,
-        totalBytes: totalUploadBytes,
-        loadedBytes: totalUploadBytes,
+        uploadedFiles: index.total_assets,
+        skippedFiles: 0,
+        totalBytes,
+        loadedBytes: totalBytes,
         speedBps: 0,
         startedAt,
-        message: `Done! Uploaded ${uploadedFilesCount.toLocaleString()} new clips${skippedCount ? `, skipped ${skippedCount.toLocaleString()} existing` : ""}. Total indexed: ${totalIndexedCount.toLocaleString()}.`,
+        message: `Done in ${elapsedMs}ms! Indexed ${index.total_assets.toLocaleString()} clips across ${index.celebrities.length.toLocaleString()} celebrities — saved & ready for Shorts.`,
       });
-    } catch (err) {
-      const isCancelled = err?.name === "AbortError" || controller.signal.aborted;
-      if (uploadedFilesCount > 0) {
-        saveCachedVaultManifest(wsCacheKey, existingMap);
-      }
-      if (isCancelled || uploadedFilesCount > 0) {
+
+      // Quietly seed 1 compressed (~35 KB) representative image per celebrity to the backend so server-side AI script & scene matching also knows every celebrity
+      (async () => {
         try {
+          const cachedManifest = await getCachedVaultManifest(wsCacheKey);
+          const seedBatch = [];
+          for (const [, items] of filesByCelebrity.entries()) {
+            if (controller.signal.aborted) return;
+            const preferred = items.find((it) => it.media_type === "image") || items[0];
+            if (!preferred) continue;
+            const seedKey = `seed:${preferred.celebrity_name.toLowerCase()}`;
+            if (cachedManifest[seedKey]) continue;
+            const seedItem = await createCelebritySeedFile(preferred, preferred.celebrity_name);
+            if (seedItem) {
+              seedBatch.push({ ...seedItem, seedKey });
+            }
+          }
+          if (!seedBatch.length || controller.signal.aborted) return;
+
+          let serverFolderPath = "";
+          const CHUNK = 25;
+          for (let i = 0; i < seedBatch.length; i += CHUNK) {
+            if (controller.signal.aborted) return;
+            const slice = seedBatch.slice(i, i + CHUNK);
+            const fd = new FormData();
+            fd.append("celebrity_name", "");
+            fd.append("skip_scan", "true");
+            fd.append("skip_existing", "true");
+            fd.append("defer_index", "true");
+            for (const s of slice) {
+              fd.append("files", s.file, s.relPath);
+            }
+            const res = await apiUpload("/assets/upload-bulk", fd, {
+              workspaceId,
+              signal: controller.signal,
+            });
+            if (res?.folder_path) serverFolderPath = res.folder_path;
+            for (const s of slice) cachedManifest[s.seedKey] = 1;
+          }
+          saveCachedVaultManifest(wsCacheKey, cachedManifest);
           await rescanVaultWithFallback({
             workspaceId,
             preference,
+            signal: controller.signal,
             fallbackFolderPath: serverFolderPath,
           });
           setVaultVersion((v) => v + 1);
         } catch {}
-      }
-      const errDetail = err?.path ? `${err?.message || "Upload failed."} (${err.status || "error"} · ${err.path})` : (err?.message || "Upload failed.");
+      })();
+    } catch (err) {
+      const isCancelled = err?.name === "AbortError" || controller.signal.aborted;
+      const errDetail = err?.path ? `${err?.message || "Sync failed."} (${err.status || "error"} · ${err.path})` : (err?.message || "Sync failed.");
       setVaultJob((cur) => ({
         ...(cur || {}),
         id: startedAt,
         title: "Celebrity Clips Sync",
         phase: isCancelled ? "cancelled" : "error",
-        message: isCancelled
-          ? "Upload stopped — completed files were saved & indexed. Re-select or re-sync anytime to resume."
-          : `${errDetail}${uploadedFilesCount > 0 ? ` (${uploadedFilesCount} completed clips saved — re-sync to continue.)` : ""}`,
+        message: isCancelled ? "Folder sync stopped." : errDetail,
       }));
     } finally {
       if (vaultAbortRef.current === controller) {
@@ -836,6 +750,10 @@ export function UploadProvider({ children }) {
         savedFolder,
         setSavedFolder,
         forgetSavedFolder,
+        localVaultIndex,
+        getLocalPreviewUrl,
+        getLocalFile,
+        matchLocalFileForScene,
         startVaultUpload,
         startVaultUploadFromHandle,
         startLibraryUpload,

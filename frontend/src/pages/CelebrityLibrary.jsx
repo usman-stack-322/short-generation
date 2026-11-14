@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, mediaUrl } from "../services/api";
 import { rescanVaultWithFallback, useUploads } from "../context/UploadContext";
+import { mergeVaultLibraries } from "../utils/folderStore";
 import { PageHeader, EmptyState } from "../components/Shell";
 import { Button } from "../components/UI";
 import {
@@ -65,6 +66,8 @@ export default function CelebrityLibrary() {
     vaultVersion,
     savedFolder,
     forgetSavedFolder,
+    localVaultIndex,
+    getLocalPreviewUrl,
     startVaultUpload,
     startVaultUploadFromHandle,
     cancelVaultUpload,
@@ -255,13 +258,15 @@ export default function CelebrityLibrary() {
     return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
   }
 
-  const filteredCelebrities = (library?.celebrities || [])
+  const effectiveLibrary = mergeVaultLibraries(library, localVaultIndex, getLocalPreviewUrl);
+
+  const filteredCelebrities = (effectiveLibrary?.celebrities || [])
     .filter((c) => !query.trim() || c.celebrity_name.toLowerCase().includes(query.trim().toLowerCase()))
     .map((c) => ({
       ...c,
       assets: c.assets.filter((a) => mediaFilter === "all" || a.media_type === mediaFilter),
     }))
-    .filter((c) => c.assets.length > 0);
+    .filter((c) => c.assets.length > 0 || (mediaFilter === "all" && c.total_count > 0));
 
   const livePct =
     vaultJob?.phase === "checking" && vaultJob?.totalFiles > 0
@@ -404,12 +409,12 @@ export default function CelebrityLibrary() {
             </div>
           )}
 
-          {!savedFolder?.handle && library?.total_assets > 0 && (
+          {!savedFolder?.handle && effectiveLibrary?.total_assets > 0 && (
             <div className="vault-saved-bar" style={{ marginBottom: 12 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                 <CheckCircle2 size={16} color="#16a34a" />
                 <span style={{ fontWeight: 600, fontSize: 13 }}>
-                  Saved in workspace: {library.total_assets.toLocaleString()} clips across {library.celebrities.length} celebrities (reused automatically in Create Short).
+                  Saved in workspace: {effectiveLibrary.total_assets.toLocaleString()} clips across {effectiveLibrary.celebrities.length} celebrities (reused automatically in Create Short).
                 </span>
               </div>
             </div>
@@ -544,15 +549,15 @@ export default function CelebrityLibrary() {
         </div>
       </div>
 
-      {library?.folder_path && (
+      {effectiveLibrary?.folder_path && (
         <div className="vault-status-strip">
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span className="vault-folder-pill">
               <FolderOpen size={14} />
-              <span>{library.folder_path}</span>
+              <span>{effectiveLibrary.folder_path}</span>
             </span>
-            <span className="count-chip">{library.total_assets} assets</span>
-            <span className="vault-helper-text">{library.celebrities.length} celebrities indexed (showing up to 12 previews each)</span>
+            <span className="count-chip">{effectiveLibrary.total_assets.toLocaleString()} assets</span>
+            <span className="vault-helper-text">{effectiveLibrary.celebrities.length} celebrities indexed (showing up to 16 previews each)</span>
           </div>
           <Button variant="secondary" disabled={busy || uploadActive} onClick={rescanLibrary}>
             <RefreshCw size={14} />
@@ -590,12 +595,12 @@ export default function CelebrityLibrary() {
         </div>
       </div>
 
-      {!library ? (
+      {!effectiveLibrary ? (
         <p role="status">Loading celebrity library…</p>
       ) : filteredCelebrities.length === 0 ? (
         <EmptyState
           title="No celebrity assets indexed yet"
-          detail="Connect your main folder path or click Upload Main Folder above."
+          detail="Connect your main folder path or click Select Main Folder above."
         />
       ) : (
         <div style={{ display: "grid", gap: 20 }}>
@@ -609,17 +614,24 @@ export default function CelebrityLibrary() {
                 </div>
               </div>
               <div className="vault-media-grid">
-                {celeb.assets.map((asset) => (
+                {celeb.assets.map((asset) => {
+                  const previewSrc = mediaUrl(asset.local_blob_url || asset.preview_url);
+                  return (
                   <div key={asset.id} className="vault-asset-card">
                     <div className="vault-media-thumb">
-                      {asset.media_type === "video" ? (
+                      {!previewSrc ? (
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 6, color: "#64748b", fontSize: 12 }}>
+                          {asset.media_type === "video" ? <Film size={22} /> : <ImageIcon size={22} />}
+                          <span>Indexed {asset.media_type}</span>
+                        </div>
+                      ) : asset.media_type === "video" ? (
                         <>
                           <video
-                            src={mediaUrl(asset.preview_url)}
+                            src={previewSrc}
                             muted
                             loop
                             playsInline
-                            preload="none"
+                            preload="metadata"
                             onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
                             onMouseLeave={(e) => { e.currentTarget.pause(); e.currentTarget.currentTime = 0; }}
                           />
@@ -628,7 +640,7 @@ export default function CelebrityLibrary() {
                           </span>
                         </>
                       ) : (
-                        <img src={mediaUrl(asset.preview_url)} alt={asset.file_name} loading="lazy" />
+                        <img src={previewSrc} alt={asset.file_name} loading="lazy" />
                       )}
                     </div>
                     <div className="vault-asset-meta">
@@ -641,7 +653,8 @@ export default function CelebrityLibrary() {
                       </div>
                     </div>
                   </div>
-                ))}
+                );
+                })}
               </div>
             </section>
           ))}
