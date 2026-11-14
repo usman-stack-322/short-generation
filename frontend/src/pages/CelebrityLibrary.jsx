@@ -1,20 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, mediaUrl } from "../services/api";
 import { useUploads } from "../context/UploadContext";
 import { PageHeader, EmptyState } from "../components/Shell";
 import { Button } from "../components/UI";
 import {
+  ArrowUp,
   CheckCircle2,
   Film,
   FolderOpen,
   FolderSync,
   FolderUp,
+  HardDrive,
   Image as ImageIcon,
   Loader2,
   RefreshCw,
   Search,
   Trash2,
   Upload,
+  X,
   XCircle,
 } from "lucide-react";
 
@@ -27,17 +30,27 @@ async function collectDroppedFiles(dataTransfer) {
   const collected = [];
   async function walk(entry, prefix = "") {
     if (entry.isFile) {
-      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
-      collected.push({ file, relPath: prefix ? `${prefix}/${file.name}` : file.name });
+      try {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        if (file && file.size > 0 && !file.name.startsWith(".tmp_")) {
+          collected.push({ file, relPath: prefix ? `${prefix}/${file.name}` : file.name });
+        }
+      } catch {}
     } else if (entry.isDirectory) {
+      const low = (entry.name || "").toLowerCase();
+      if (entry.name.startsWith(".tmp_") || entry.name.startsWith("$") || low === "system volume information") {
+        return;
+      }
       const reader = entry.createReader();
       let batch;
-      do {
-        batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
-        for (const child of batch) {
-          await walk(child, prefix ? `${prefix}/${entry.name}` : entry.name);
-        }
-      } while (batch.length > 0);
+      try {
+        do {
+          batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          for (const child of batch) {
+            await walk(child, prefix ? `${prefix}/${entry.name}` : entry.name);
+          }
+        } while (batch.length > 0);
+      } catch {}
     }
   }
   for (const entry of entries) {
@@ -66,12 +79,26 @@ export default function CelebrityLibrary() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [canBrowseLocal, setCanBrowseLocal] = useState(false);
+  const [pcBrowserOpen, setPcBrowserOpen] = useState(false);
+  const [pcBrowserData, setPcBrowserData] = useState(null);
+  const [pcBrowserLoading, setPcBrowserLoading] = useState(false);
+  const [pcBrowserError, setPcBrowserError] = useState("");
+  const folderInputRef = useRef(null);
 
   const supportsFolderPicker =
     typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
   const uploadActive = Boolean(
     vaultJob && ["scanning", "checking", "uploading", "indexing"].includes(vaultJob.phase)
   );
+
+  useEffect(() => {
+    const el = folderInputRef.current;
+    if (!el) return;
+    el.webkitdirectory = true;
+    el.directory = true;
+    el.mozdirectory = true;
+  }, []);
 
   async function load() {
     try {
@@ -86,22 +113,54 @@ export default function CelebrityLibrary() {
 
   useEffect(() => { load(); }, [vaultVersion]);
 
-  async function connectFolder(e) {
-    if (e) e.preventDefault();
-    if (!folderPath.trim()) return;
-    setBusy(true); setError(""); setStatus("");
+  useEffect(() => {
+    if (!localStorage.getItem("token")) return;
+    api("/assets/local-browse")
+      .then(() => setCanBrowseLocal(true))
+      .catch(() => setCanBrowseLocal(false));
+  }, []);
+
+  async function openPcBrowser(targetPath = "") {
+    setPcBrowserOpen(true);
+    setPcBrowserLoading(true);
+    setPcBrowserError("");
+    try {
+      const qs = targetPath ? `?path=${encodeURIComponent(targetPath)}` : "";
+      const data = await api(`/assets/local-browse${qs}`);
+      setPcBrowserData(data);
+    } catch (err) {
+      setPcBrowserError(err?.message || "Could not inspect local disk folders.");
+    } finally {
+      setPcBrowserLoading(false);
+    }
+  }
+
+  async function connectPickedLocalFolder(selectedPath) {
+    const clean = (selectedPath || "").trim();
+    if (!clean) return;
+    setFolderPath(clean);
+    setPcBrowserOpen(false);
+    setBusy(true);
+    setError("");
+    setStatus("");
     try {
       const res = await api("/assets/connect-folder", {
         method: "POST",
-        body: JSON.stringify({ folder_path: folderPath.trim(), preference }),
+        body: JSON.stringify({ folder_path: clean, preference }),
       });
-      setStatus(`Connected folder (${res.total_assets} assets across ${res.celebrities.length} celebrities).`);
+      setStatus(`Saved & indexed ${res.total_assets.toLocaleString()} assets across ${res.celebrities.length} celebrities — ready for permanent reuse.`);
       await load();
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function connectFolder(e) {
+    if (e) e.preventDefault();
+    if (!folderPath.trim()) return;
+    await connectPickedLocalFolder(folderPath);
   }
 
   function uploadEntries(rawItems) {
@@ -115,11 +174,16 @@ export default function CelebrityLibrary() {
   }
 
   function uploadBulkFiles(fileList) {
+    setError("");
     const items = Array.from(fileList || []).map((file) => ({
       file,
       relPath: file.webkitRelativePath || file.name,
     }));
-    if (items.length) uploadEntries(items);
+    if (!items.length) {
+      setStatus("No readable files were returned from that folder. Choose a folder containing images or video clips.");
+      return;
+    }
+    uploadEntries(items);
   }
 
   async function rescanLibrary() {
@@ -141,21 +205,40 @@ export default function CelebrityLibrary() {
   }
 
   async function pickMainFolderFast() {
-    if (!supportsFolderPicker) return;
     setError("");
     setStatus("");
+    if (!supportsFolderPicker) {
+      folderInputRef.current?.click();
+      return;
+    }
+    const openedAt = Date.now();
     try {
       const handle = await window.showDirectoryPicker({
-        id: "celebrity-vault",
         mode: "read",
       });
       await startVaultUploadFromHandle(handle, {
         celebrityName: bulkCelebrity,
         preference,
+        skipPermissionCheck: true,
       });
     } catch (err) {
+      const elapsed = Date.now() - openedAt;
+      const blockedByContext =
+        err?.name === "SecurityError" ||
+        err?.name === "NotAllowedError" ||
+        err?.name === "TypeError" ||
+        (err?.name === "AbortError" && elapsed < 400);
+      if (blockedByContext) {
+        if (folderInputRef.current) {
+          setStatus("Opening standard folder browser (direct folder access can be restricted on protected folders like Desktop or Downloads).");
+          folderInputRef.current.click();
+        } else {
+          setError("Direct folder picker was blocked by the browser. Click Browse Folder instead.");
+        }
+        return;
+      }
       if (err?.name !== "AbortError") {
-        setError(err?.message || "Could not open folder picker.");
+        setError(err?.message || "Could not open folder picker. Try Browse Folder instead.");
       }
     }
   }
@@ -164,7 +247,8 @@ export default function CelebrityLibrary() {
     if (!bytes || bytes <= 0) return "0 MB";
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
   }
 
   const filteredCelebrities = (library?.celebrities || [])
@@ -233,11 +317,23 @@ export default function CelebrityLibrary() {
           </div>
 
           <p className="vault-helper-text" style={{ marginBottom: 14 }}>
-            Instant local indexing: reads celebrity subfolders directly from disk without copying gigabytes of video files.
+            Best for 100 GB – 1 TB+ local folders: scans directly on disk in seconds with zero file copying and stays saved permanently.
           </p>
 
-          <div className="studio-card-footer">
-            <Button type="submit" loading={busy} style={{ width: "100%" }}>
+          <div className="studio-card-footer" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {canBrowseLocal && (
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={busy || uploadActive}
+                onClick={() => openPcBrowser(folderPath.trim())}
+                style={{ flex: "1 1 150px" }}
+              >
+                <HardDrive size={15} />
+                <span>Browse This PC</span>
+              </Button>
+            )}
+            <Button type="submit" loading={busy} style={{ flex: "2 1 190px" }}>
               <span>Scan &amp; Connect Folder</span>
             </Button>
           </div>
@@ -250,6 +346,23 @@ export default function CelebrityLibrary() {
               <span>People &amp; Clips Sync</span>
             </h3>
           </div>
+
+          {canBrowseLocal && (
+            <div className="vault-saved-bar" style={{ marginBottom: 12 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 500 }}>
+                100 GB+ folder on this PC? Link directly in ~2s with zero copying:
+              </span>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={busy || uploadActive}
+                onClick={() => openPcBrowser("")}
+              >
+                <HardDrive size={14} />
+                <span>Browse This PC (Instant)</span>
+              </Button>
+            </div>
+          )}
 
           {savedFolder?.handle && (
             <div className="vault-saved-bar">
@@ -322,6 +435,7 @@ export default function CelebrityLibrary() {
                 <FolderUp size={15} />
                 <span>{supportsFolderPicker ? "Browse Folder" : "Upload Main Folder"}</span>
                 <input
+                  ref={folderInputRef}
                   type="file"
                   multiple
                   webkitdirectory=""
@@ -494,6 +608,151 @@ export default function CelebrityLibrary() {
               </div>
             </section>
           ))}
+        </div>
+      )}
+      {pcBrowserOpen && (
+        <div
+          className="studio-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Browse Local PC Folder"
+          onClick={() => setPcBrowserOpen(false)}
+        >
+          <div className="studio-modal" style={{ width: "min(640px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="studio-modal-header">
+              <div>
+                <h3 style={{ margin: 0, fontSize: 17 }}>Select Local Celebrity Folder</h3>
+                <p className="vault-helper-text" style={{ marginTop: 4 }}>
+                  Pick your main folder once — scans 100 GB+ directly from disk with zero copying and saves permanently.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="button button-secondary"
+                style={{ minHeight: 34, padding: "0 10px" }}
+                onClick={() => setPcBrowserOpen(false)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {pcBrowserError && <div className="notice notice-error" role="alert">{pcBrowserError}</div>}
+
+            {pcBrowserData?.shortcuts?.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                {pcBrowserData.shortcuts.map((s) => (
+                  <button
+                    key={s.path}
+                    type="button"
+                    className={`filter-pill ${pcBrowserData.current_path === s.path ? "active" : ""}`}
+                    onClick={() => openPcBrowser(s.path)}
+                  >
+                    {s.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+              {pcBrowserData?.current_path && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={pcBrowserLoading}
+                  onClick={() => openPcBrowser(pcBrowserData.parent_path || "")}
+                >
+                  <ArrowUp size={14} />
+                  <span>Up</span>
+                </Button>
+              )}
+              <div
+                style={{
+                  flex: 1,
+                  minWidth: 200,
+                  padding: "8px 12px",
+                  borderRadius: 10,
+                  border: "1px solid var(--edge-e6e8ef, #e2e8f0)",
+                  background: "var(--bg-f8f8fb, #f8fafc)",
+                  fontFamily: "monospace",
+                  fontSize: 12.5,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={pcBrowserData?.current_path || "This PC"}
+              >
+                {pcBrowserData?.current_path || "This PC (Choose a Drive or Shortcut)"}
+              </div>
+            </div>
+
+            <div
+              style={{
+                border: "1px solid var(--edge-e6e8ef, #e2e8f0)",
+                borderRadius: 12,
+                maxHeight: 300,
+                overflowY: "auto",
+                marginBottom: 14,
+              }}
+            >
+              {pcBrowserLoading ? (
+                <p style={{ padding: 18, margin: 0, textAlign: "center", color: "#64748b" }}>
+                  Loading folders…
+                </p>
+              ) : !pcBrowserData?.folders?.length ? (
+                <p style={{ padding: 18, margin: 0, textAlign: "center", color: "#64748b", fontSize: 13 }}>
+                  No subfolders inside this directory
+                  {pcBrowserData?.direct_media_count ? ` (${pcBrowserData.direct_media_count} media files found directly here)` : "."}
+                </p>
+              ) : (
+                pcBrowserData.folders.map((f) => (
+                  <button
+                    key={f.path}
+                    type="button"
+                    onClick={() => openPcBrowser(f.path)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "10px 14px",
+                      border: "none",
+                      borderBottom: "1px solid var(--edge-e6e8ef, #e2e8f0)",
+                      background: "transparent",
+                      color: "inherit",
+                      cursor: "pointer",
+                      fontSize: 13.5,
+                      fontWeight: 500,
+                    }}
+                  >
+                    <FolderOpen size={16} color="#4f46e5" />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+                  </button>
+                ))
+              )}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span className="vault-helper-text">
+                {pcBrowserData?.current_path
+                  ? `${pcBrowserData.folders?.length || 0} subfolder(s)${pcBrowserData.direct_media_count ? ` · ${pcBrowserData.direct_media_count} direct clips` : ""}`
+                  : "Open any drive or Desktop/Downloads folder to connect."}
+              </span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Button type="button" variant="secondary" onClick={() => setPcBrowserOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={!pcBrowserData?.current_path || pcBrowserLoading || busy}
+                  onClick={() => connectPickedLocalFolder(pcBrowserData.current_path)}
+                >
+                  <CheckCircle2 size={15} />
+                  <span>Connect &amp; Save This Folder</span>
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import httpx
 from PIL import Image, ImageOps
+from sqlalchemy import func, select
 
 from app.core.security import new_id
 from app.models import CelebrityAsset, CelebrityFolder
@@ -182,15 +183,132 @@ def _parse_celebrity_and_mood(root: Path, file_path: Path) -> tuple[str, list[st
     return celeb.title(), sorted(set(moods))
 
 
+def _iter_media_entries(root: Path):
+    """Fast iterative os.scandir walk yielding (Path, ext, stat_result) while skipping protected/temp dirs."""
+    stack = [str(root)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    name = entry.name
+                    if name.startswith('.tmp_') or name.startswith('$'):
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if name.lower() == 'system volume information':
+                                continue
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            ext = os.path.splitext(name)[1].lower()
+                            if ext in ALLOWED_EXTS:
+                                yield Path(entry.path), ext, entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+
 def _iter_media_files(root: Path):
-    """Fast os.walk scanner supporting large nested directories."""
-    for dirpath, _, filenames in os.walk(root):
-        for fname in filenames:
-            if fname.startswith('.tmp_'):
-                continue
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in ALLOWED_EXTS:
-                yield Path(dirpath) / fname, ext
+    """Backwards-compatible media file iterator."""
+    for path, ext, _st in _iter_media_entries(root):
+        yield path, ext
+
+
+def _ensure_vault_folder_row(db, workspace_id: str, root: Path, preference: str | None = None) -> CelebrityFolder:
+    folder_row = db.get(CelebrityFolder, workspace_id)
+    if folder_row:
+        if not folder_row.folder_path or Path(folder_row.folder_path) != root:
+            folder_row.folder_path = str(root)
+        if preference:
+            folder_row.preference = preference
+    else:
+        folder_row = CelebrityFolder(
+            workspace_id=workspace_id,
+            folder_path=str(root),
+            preference=preference or 'mix_both',
+        )
+        db.add(folder_row)
+    return folder_row
+
+
+def index_vault_files(db, workspace_id: str, root: Path, saved_paths: list[Path], preference: str | None = None) -> int:
+    """Incrementally register newly uploaded clips in SQLite so 100GB+ uploads are usable immediately."""
+    if not saved_paths:
+        return 0
+    _ensure_vault_folder_row(db, workspace_id, root, preference)
+    now = datetime.now(timezone.utc)
+    records_map: dict[str, tuple[str, str, str, str, str, str]] = {}
+    for raw_path in saved_paths:
+        try:
+            path = raw_path.resolve()
+            st = path.stat()
+        except OSError:
+            continue
+        if st.st_size <= 0:
+            continue
+        ext = path.suffix.lower()
+        if ext not in ALLOWED_EXTS or path.name.startswith('.tmp_'):
+            continue
+        media_type = 'video' if ext in VIDEO_EXTS else 'image'
+        celeb_name, moods = _parse_celebrity_and_mood(root, path)
+        records_map[str(path)] = (
+            celeb_name,
+            json.dumps(moods),
+            media_type,
+            path.name,
+            ext,
+            _fast_fingerprint(path, st),
+        )
+    if not records_map:
+        return 0
+
+    fps = list(records_map.keys())
+    existing_rows: dict[str, CelebrityAsset] = {}
+    for idx in range(0, len(fps), 500):
+        chunk = fps[idx: idx + 500]
+        for row in db.query(CelebrityAsset).filter(
+            CelebrityAsset.workspace_id == workspace_id,
+            CelebrityAsset.file_path.in_(chunk),
+        ).all():
+            existing_rows[row.file_path] = row
+
+    new_records: list[CelebrityAsset] = []
+    for fp, (celeb_name, moods_json, media_type, file_name, ext, digest) in records_map.items():
+        prev = existing_rows.get(fp)
+        if prev:
+            if (
+                prev.content_hash != digest
+                or prev.celebrity_name != celeb_name
+                or prev.mood_tags != moods_json
+                or prev.media_type != media_type
+            ):
+                prev.celebrity_name = celeb_name
+                prev.mood_tags = moods_json
+                prev.media_type = media_type
+                prev.file_name = file_name
+                prev.ext = ext
+                prev.content_hash = digest
+        else:
+            new_records.append(
+                CelebrityAsset(
+                    id=new_id(),
+                    workspace_id=workspace_id,
+                    celebrity_name=celeb_name,
+                    mood_tags=moods_json,
+                    media_type=media_type,
+                    file_name=file_name,
+                    file_path=fp,
+                    ext=ext,
+                    duration=None,
+                    content_hash=digest,
+                    created_at=now,
+                )
+            )
+    for idx in range(0, len(new_records), 1000):
+        db.bulk_save_objects(new_records[idx: idx + 1000])
+    db.commit()
+    return len(records_map)
 
 
 def scan_celebrity_folder(db, workspace_id: str, folder_path: str, preference: str = 'mix_both') -> dict:
@@ -204,11 +322,7 @@ def scan_celebrity_folder(db, workspace_id: str, folder_path: str, preference: s
     scanned: dict[str, tuple[str, str, str, str, str, str]] = {}
     celeb_names: set[str] = set()
 
-    for path, ext in sorted(_iter_media_files(root), key=lambda pair: str(pair[0])):
-        try:
-            st = path.stat()
-        except OSError:
-            continue
+    for path, ext, st in sorted(_iter_media_entries(root), key=lambda item: str(item[0])):
         if st.st_size <= 0:
             continue
         media_type = 'video' if ext in VIDEO_EXTS else 'image'
@@ -223,21 +337,17 @@ def scan_celebrity_folder(db, workspace_id: str, folder_path: str, preference: s
             _fast_fingerprint(path, st),
         )
 
-    folder_row = db.get(CelebrityFolder, workspace_id)
-    if folder_row:
-        folder_row.folder_path = str(root)
-        folder_row.preference = preference or folder_row.preference
-    else:
-        folder_row = CelebrityFolder(workspace_id=workspace_id, folder_path=str(root), preference=preference or 'mix_both')
-        db.add(folder_row)
+    folder_row = _ensure_vault_folder_row(db, workspace_id, root, preference or 'mix_both')
 
     existing_rows = {
         r.file_path: r
         for r in db.query(CelebrityAsset).filter_by(workspace_id=workspace_id).all()
     }
     stale_ids = [r.id for fp, r in existing_rows.items() if fp not in scanned]
-    if stale_ids:
-        db.query(CelebrityAsset).filter(CelebrityAsset.id.in_(stale_ids)).delete(synchronize_session=False)
+    for idx in range(0, len(stale_ids), 500):
+        db.query(CelebrityAsset).filter(
+            CelebrityAsset.id.in_(stale_ids[idx: idx + 500])
+        ).delete(synchronize_session=False)
 
     new_records: list[CelebrityAsset] = []
     for fp, (celeb_name, moods_json, media_type, file_name, ext, digest) in scanned.items():
@@ -272,8 +382,8 @@ def scan_celebrity_folder(db, workspace_id: str, folder_path: str, preference: s
                 )
             )
 
-    if new_records:
-        db.bulk_save_objects(new_records)
+    for idx in range(0, len(new_records), 1000):
+        db.bulk_save_objects(new_records[idx: idx + 1000])
     db.commit()
     return {
         'workspace_id': workspace_id,
@@ -301,39 +411,69 @@ def list_vault_celebrity_names(db, workspace_id: str, limit: int = 120) -> list[
 
 def list_celebrity_library(db, workspace_id: str, limit_per_celebrity: int = 12) -> dict:
     folder_row = db.get(CelebrityFolder, workspace_id)
-    rows = (
-        db.query(CelebrityAsset)
+    count_rows = (
+        db.query(CelebrityAsset.celebrity_name, CelebrityAsset.media_type, func.count(CelebrityAsset.id))
         .filter_by(workspace_id=workspace_id)
-        .order_by(CelebrityAsset.celebrity_name, CelebrityAsset.file_name)
+        .group_by(CelebrityAsset.celebrity_name, CelebrityAsset.media_type)
+        .order_by(CelebrityAsset.celebrity_name)
         .all()
     )
     grouped: dict[str, dict] = {}
-    for row in rows:
-        entry = grouped.setdefault(row.celebrity_name, {
-            'celebrity_name': row.celebrity_name,
+    total_assets = 0
+    for celeb_name, media_type, cnt in count_rows:
+        entry = grouped.setdefault(celeb_name, {
+            'celebrity_name': celeb_name,
             'image_count': 0,
             'video_count': 0,
             'assets': [],
         })
-        if row.media_type == 'video':
-            entry['video_count'] += 1
+        if media_type == 'video':
+            entry['video_count'] += cnt
         else:
-            entry['image_count'] += 1
-        if limit_per_celebrity <= 0 or len(entry['assets']) < limit_per_celebrity:
-            entry['assets'].append({
-                'id': row.id,
-                'celebrity_name': row.celebrity_name,
-                'media_type': row.media_type,
-                'file_name': row.file_name,
-                'ext': row.ext,
-                'duration': row.duration,
-                'mood_tags': json.loads(row.mood_tags or '[]'),
-                'preview_url': f'/api/assets/vault/{row.id}/file',
-            })
+            entry['image_count'] += cnt
+        total_assets += cnt
+
+    if limit_per_celebrity > 0 and grouped:
+        ranked = select(
+            CelebrityAsset.id.label('asset_id'),
+            func.row_number().over(
+                partition_by=CelebrityAsset.celebrity_name,
+                order_by=CelebrityAsset.file_name,
+            ).label('rn'),
+        ).where(CelebrityAsset.workspace_id == workspace_id).subquery()
+        preview_rows = (
+            db.query(CelebrityAsset)
+            .join(ranked, CelebrityAsset.id == ranked.c.asset_id)
+            .filter(ranked.c.rn <= limit_per_celebrity)
+            .order_by(CelebrityAsset.celebrity_name, CelebrityAsset.file_name)
+            .all()
+        )
+    else:
+        preview_rows = (
+            db.query(CelebrityAsset)
+            .filter_by(workspace_id=workspace_id)
+            .order_by(CelebrityAsset.celebrity_name, CelebrityAsset.file_name)
+            .all()
+        )
+
+    for row in preview_rows:
+        entry = grouped.get(row.celebrity_name)
+        if not entry:
+            continue
+        entry['assets'].append({
+            'id': row.id,
+            'celebrity_name': row.celebrity_name,
+            'media_type': row.media_type,
+            'file_name': row.file_name,
+            'ext': row.ext,
+            'duration': row.duration,
+            'mood_tags': json.loads(row.mood_tags or '[]'),
+            'preview_url': f'/api/assets/vault/{row.id}/file',
+        })
     return {
         'folder_path': folder_row.folder_path if folder_row else '',
         'preference': folder_row.preference if folder_row else 'mix_both',
-        'total_assets': len(rows),
+        'total_assets': total_assets,
         'celebrities': list(grouped.values()),
     }
 

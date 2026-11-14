@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from app.models import CelebrityAsset, CelebrityFolder
-from app.services.celebrity_vault import _parse_celebrity_and_mood, match_celebrity_asset, scan_celebrity_folder
+from app.services.celebrity_vault import _parse_celebrity_and_mood, list_celebrity_library, match_celebrity_asset, scan_celebrity_folder
 from app.services.title_shorts import TitleInput
 from app.tts import capabilities, providers
 from app.video.alignment import load_boundaries, write_acoustic_word_boundaries
@@ -45,10 +45,11 @@ def test_vault_parser_cleans_subfolders_and_drive_noise(tmp_path):
 
 
 def test_vault_matcher_prefers_stephen_a_smith_and_blocks_missing_person_hijack(tmp_path):
-    from app.database.session import Base, SessionLocal, engine
+    from app.database.migrate import migrate_database
+    from app.database.session import SessionLocal
     from app.models import Workspace
     from app.core.security import new_id
-    Base.metadata.create_all(bind=engine)
+    migrate_database()
 
     vault = tmp_path / 'vault'
     (vault / 'Stephen A. Smith').mkdir(parents=True)
@@ -211,3 +212,147 @@ def test_viral_captions_and_dynamic_transitions(tmp_path):
     assert changes[0]['type'] == 'dissolve'
     assert changes[0]['transition'] == 'smoothleft'
     assert changes[0]['duration'] == pytest.approx(0.45)
+
+
+def test_large_vault_chunked_sqlite_scan_and_library_window(tmp_path):
+    from app.core.security import new_id
+    from app.database.migrate import migrate_database
+    from app.database.session import SessionLocal
+    from app.models import Workspace
+
+    migrate_database()
+    vault = tmp_path / 'massive_vault'
+    celebs = ['Lebron James', 'Stephen Curry', 'Kevin Durant']
+    for celeb in celebs:
+        cdir = vault / celeb
+        cdir.mkdir(parents=True)
+        for idx in range(360):
+            (cdir / f'clip_{idx:04d}.mp4').write_bytes(b'x')
+
+    ws_id = new_id()
+    with SessionLocal() as db:
+        db.add(Workspace(id=ws_id, name='Massive Vault WS'))
+        db.commit()
+
+        summary = scan_celebrity_folder(db, ws_id, str(vault), 'mix_both')
+        assert summary['total_assets'] == 1080
+        assert set(summary['celebrities']) == set(celebs)
+
+        lib = list_celebrity_library(db, ws_id, limit_per_celebrity=5)
+        assert lib['total_assets'] == 1080
+        assert len(lib['celebrities']) == 3
+        for item in lib['celebrities']:
+            assert item['video_count'] == 360
+            assert len(item['assets']) == 5
+
+        # Delete >1000 files so chunked SQLite stale deletion handles >999 IDs cleanly
+        for celeb in celebs[:2]:
+            for f in (vault / celeb).glob('*.mp4'):
+                f.unlink()
+        for f in list((vault / celebs[2]).glob('*.mp4'))[:310]:
+            f.unlink()
+
+        rescan = scan_celebrity_folder(db, ws_id, str(vault), 'mix_both')
+        assert rescan['total_assets'] == 50
+
+        db.query(CelebrityAsset).filter_by(workspace_id=ws_id).delete()
+        db.query(CelebrityFolder).filter_by(workspace_id=ws_id).delete()
+        db.query(Workspace).filter_by(id=ws_id).delete()
+        db.commit()
+
+
+def test_vault_chunk_upload_immediate_index_and_local_browse(tmp_path):
+    import io
+    from fastapi import HTTPException, UploadFile
+    from starlette.requests import Request
+    from app.api.studio import assets_library, browse_local_folders, upload_bulk, upload_vault_chunk
+    from app.core.security import new_id
+    from app.database.migrate import migrate_database
+    from app.database.session import SessionLocal
+    from app.models import Workspace
+
+    migrate_database()
+    browse_dir = tmp_path / 'pc_vault_root'
+    (browse_dir / 'Kobe Bryant').mkdir(parents=True)
+    (browse_dir / 'Kobe Bryant' / 'dunk.mp4').write_bytes(b'kobe-clip-bytes')
+
+    ws_id = new_id()
+    ctx = (SimpleNamespace(id=new_id(), name='Owner'), SimpleNamespace(workspace_id=ws_id, role='OWNER'))
+    loopback_req = Request({'type': 'http', 'client': ('127.0.0.1', 50123), 'headers': []})
+    remote_req = Request({
+        'type': 'http',
+        'client': ('127.0.0.1', 50123),
+        'headers': [(b'x-forwarded-for', b'198.51.100.1')],
+    })
+
+    # Loopback browser succeeds; remote proxied request is rejected cleanly
+    root_res = browse_local_folders(loopback_req, path='', context=ctx)
+    assert isinstance(root_res['shortcuts'], list)
+
+    sub_res = browse_local_folders(loopback_req, path=str(browse_dir), context=ctx)
+    assert any(f['name'] == 'Kobe Bryant' for f in sub_res['folders'])
+
+    with pytest.raises(HTTPException) as exc_info:
+        browse_local_folders(remote_req, path='', context=ctx)
+    assert exc_info.value.status_code == 403
+
+    with SessionLocal() as db:
+        db.add(Workspace(id=ws_id, name='Chunk Vault Test WS'))
+        db.commit()
+
+        # Bulk upload with skip_scan=true must still save & index immediately for permanent reuse
+        bulk_file = UploadFile(file=io.BytesIO(b'jpeg-bytes-payload'), filename='MainRoot/Kobe Bryant/shot.jpg')
+        bulk_res = upload_bulk(
+            celebrity_name='',
+            skip_scan=True,
+            skip_existing=True,
+            files=[bulk_file],
+            context=ctx,
+            db=db,
+        )
+        assert bulk_res['saved'] == 1
+
+        # Resumable multi-chunk upload for large videos
+        part0, part1, part2 = b'chunk-0-', b'chunk-1-', b'chunk-2-end'
+        full_video = part0 + part1 + part2
+        for idx, chunk_bytes in enumerate((part0, part1, part2)):
+            resp = upload_vault_chunk(
+                relative_path='MainRoot/LeBron James/finals_highlight.mp4',
+                celebrity_name='',
+                upload_id='testchunk_01',
+                chunk_index=idx,
+                total_chunks=3,
+                total_size=len(full_video),
+                file=UploadFile(file=io.BytesIO(chunk_bytes), filename='finals_highlight.mp4'),
+                context=ctx,
+                db=db,
+            )
+            if idx < 2:
+                assert resp['completed'] is False
+            else:
+                assert resp['completed'] is True
+                assert resp['saved'] == 1
+
+        # Re-sending existing size deduplicates cleanly without re-saving
+        dup = upload_vault_chunk(
+            relative_path='MainRoot/LeBron James/finals_highlight.mp4',
+            celebrity_name='',
+            upload_id='testchunk_02',
+            chunk_index=0,
+            total_chunks=3,
+            total_size=len(full_video),
+            file=UploadFile(file=io.BytesIO(part0), filename='finals_highlight.mp4'),
+            context=ctx,
+            db=db,
+        )
+        assert dup['skipped'] == 1
+
+        lib_data = assets_library(limit=12, context=ctx, db=db)
+        assert lib_data['folder_path']
+        names = {c['celebrity_name'] for c in lib_data['celebrities']}
+        assert {'Kobe Bryant', 'Lebron James'}.issubset(names)
+
+        db.query(CelebrityAsset).filter_by(workspace_id=ws_id).delete()
+        db.query(CelebrityFolder).filter_by(workspace_id=ws_id).delete()
+        db.query(Workspace).filter_by(id=ws_id).delete()
+        db.commit()

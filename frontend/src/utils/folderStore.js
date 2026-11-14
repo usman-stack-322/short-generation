@@ -99,8 +99,16 @@ export async function clearSavedDirectoryHandle(workspaceKey) {
 
 export async function ensureDirectoryPermission(handle) {
   if (!handle) return false;
-  if ((await handle.queryPermission?.({ mode: "read" })) === "granted") return true;
-  return (await handle.requestPermission?.({ mode: "read" })) === "granted";
+  try {
+    if (typeof handle.queryPermission !== "function") return true;
+    const current = await handle.queryPermission({ mode: "read" });
+    if (current === "granted") return true;
+    if (typeof handle.requestPermission !== "function") return current !== "denied";
+    return (await handle.requestPermission({ mode: "read" })) === "granted";
+  } catch {
+    // Handles returned directly from showDirectoryPicker already grant read access for the current session.
+    return typeof handle.entries === "function";
+  }
 }
 
 export async function walkDirectoryHandleParallel(dirHandle, onProgress, signal) {
@@ -111,27 +119,34 @@ export async function walkDirectoryHandleParallel(dirHandle, onProgress, signal)
   async function processDir({ handle, prefix }) {
     if (signal?.aborted) return;
     const filePromises = [];
-    for await (const [name, entry] of handle.entries()) {
-      if (signal?.aborted) return;
-      if (entry.kind === "directory") {
-        queue.push({ handle: entry, prefix: `${prefix}/${name}` });
-      } else if (entry.kind === "file" && ALLOWED_VAULT_EXT_RE.test(name) && !name.startsWith(".tmp_")) {
-        filePromises.push(
-          entry.getFile().then((file) => {
-            if (file && file.size > 0) {
-              items.push({ file, relPath: `${prefix}/${name}` });
+    try {
+      for await (const [name, entry] of handle.entries()) {
+        if (signal?.aborted) return;
+        if (entry.kind === "directory") {
+          const low = name.toLowerCase();
+          if (!name.startsWith(".tmp_") && !name.startsWith("$") && low !== "system volume information") {
+            queue.push({ handle: entry, prefix: `${prefix}/${name}` });
+          }
+        } else if (entry.kind === "file" && ALLOWED_VAULT_EXT_RE.test(name) && !name.startsWith(".tmp_")) {
+          filePromises.push(
+            entry.getFile().then((file) => {
+              if (file && file.size > 0) {
+                items.push({ file, relPath: `${prefix}/${name}` });
+              }
+            }).catch(() => {})
+          );
+          if (filePromises.length >= 64) {
+            await Promise.all(filePromises.splice(0));
+            const now = Date.now();
+            if (onProgress && now - lastTick > 80) {
+              lastTick = now;
+              onProgress(items.length);
             }
-          }).catch(() => {})
-        );
-        if (filePromises.length >= 64) {
-          await Promise.all(filePromises.splice(0));
-          const now = Date.now();
-          if (onProgress && now - lastTick > 80) {
-            lastTick = now;
-            onProgress(items.length);
           }
         }
       }
+    } catch {
+      // Skip protected or system subdirectories instead of aborting the entire folder scan.
     }
     if (filePromises.length) {
       await Promise.all(filePromises);

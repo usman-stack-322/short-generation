@@ -13,7 +13,9 @@ import {
 const ALLOWED_VAULT_EXT_RE = /\.(jpg|jpeg|png|webp|mp4|mov|webm|mkv|m4v)$/i;
 const ALLOWED_LIBRARY_IMG_RE = /\.(jpe?g|png|webp)$/i;
 const MAX_BATCH_FILES = 25;
-const MAX_BATCH_BYTES = 24 * 1024 * 1024;
+const MAX_BATCH_BYTES = 15 * 1024 * 1024;
+const LARGE_FILE_THRESHOLD = 15 * 1024 * 1024;
+const CHUNK_BYTES = 8 * 1024 * 1024;
 const VAULT_CONCURRENCY = 6;
 const LIBRARY_CONCURRENCY = 4;
 
@@ -23,7 +25,8 @@ function formatBytes(bytes) {
   if (!bytes || bytes <= 0) return "0 MB";
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
 }
 
 function buildBatches(items) {
@@ -198,21 +201,44 @@ export function UploadProvider({ children }) {
         return;
       }
 
-      // Parallel 6-worker upload for ONLY the missing/new clips
-      const batches = buildBatches(toUpload);
+      // Parallel 6-worker upload: small clips in 15MB batches, large videos in resumable 8MB chunks
+      const smallItems = [];
+      const largeItems = [];
+      for (const item of toUpload) {
+        if ((item.file.size || 0) > LARGE_FILE_THRESHOLD) {
+          largeItems.push(item);
+        } else {
+          smallItems.push(item);
+        }
+      }
+      const uploadTasks = [
+        ...buildBatches(smallItems).map((batch) => ({ kind: "batch", items: batch })),
+        ...largeItems.map((item) => ({ kind: "chunked", item })),
+      ];
       const totalUploadBytes = toUpload.reduce((sum, x) => sum + (x.file.size || 0), 0);
-      const batchLoaded = new Array(batches.length).fill(0);
-      const batchTotals = batches.map((b) => b.reduce((sum, x) => sum + (x.file.size || 0), 0));
-      let nextBatchIndex = 0;
+      const taskLoaded = new Array(uploadTasks.length).fill(0);
+      const taskTotals = uploadTasks.map((t) =>
+        t.kind === "batch"
+          ? t.items.reduce((sum, x) => sum + (x.file.size || 0), 0)
+          : t.item.file.size || 0
+      );
+      let nextTaskIndex = 0;
       let skippedOnServer = 0;
       let lastUiTick = 0;
+      let lastLiveRefreshMs = Date.now();
+      let lastRefreshedCount = 0;
       const uploadStartMs = Date.now();
 
       const updateProgress = (force = false) => {
         const now = Date.now();
         if (!force && now - lastUiTick < 120) return;
         lastUiTick = now;
-        const loaded = batchLoaded.reduce((a, b) => a + b, 0);
+        if (uploadedFilesCount > lastRefreshedCount && now - lastLiveRefreshMs > 15000) {
+          lastLiveRefreshMs = now;
+          lastRefreshedCount = uploadedFilesCount;
+          setVaultVersion((v) => v + 1);
+        }
+        const loaded = taskLoaded.reduce((a, b) => a + b, 0);
         const elapsedSec = Math.max(0.2, (now - uploadStartMs) / 1000);
         setVaultJob((cur) => {
           if (!cur || cur.id !== startedAt) return cur;
@@ -227,46 +253,96 @@ export function UploadProvider({ children }) {
             totalBytes: totalUploadBytes,
             loadedBytes: Math.min(loaded, totalUploadBytes),
             speedBps: loaded / elapsedSec,
-            message: `Uploading clips ${uploadedFilesCount}/${toUpload.length}${skippedCount ? ` · ${skippedCount.toLocaleString()} already saved skipped` : ""}`,
+            message: `Uploading clips ${uploadedFilesCount.toLocaleString()}/${toUpload.length.toLocaleString()}${skippedCount ? ` · ${skippedCount.toLocaleString()} already saved skipped` : ""}`,
           };
         });
       };
 
       updateProgress(true);
 
-      const worker = async () => {
-        while (true) {
-          if (controller.signal.aborted) return;
-          const idx = nextBatchIndex++;
-          if (idx >= batches.length) return;
-          const batch = batches[idx];
+      const uploadChunkedLargeFile = async (taskIdx, { file, relPath }) => {
+        const totalSize = file.size || 0;
+        const totalChunks = Math.max(1, Math.ceil(totalSize / CHUNK_BYTES));
+        const uploadId = `${Date.now().toString(36)}_${taskIdx}_${Math.random().toString(36).slice(2, 10)}`;
+        const resolvedRel = relPath || file.webkitRelativePath || file.name;
+        let finalRes = null;
 
-          const res = await runWithRetry(async () => {
+        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+          if (controller.signal.aborted) return finalRes;
+          const start = chunkIdx * CHUNK_BYTES;
+          const end = Math.min(totalSize, start + CHUNK_BYTES);
+          const slice = file.slice(start, end);
+
+          finalRes = await runWithRetry(async () => {
             const fd = new FormData();
+            fd.append("relative_path", resolvedRel);
             fd.append("celebrity_name", celebrityName);
-            fd.append("skip_scan", "true");
-            fd.append("skip_existing", "true");
-            for (const { file, relPath } of batch) {
-              fd.append("files", file, relPath || file.webkitRelativePath || file.name);
-            }
-            return apiUpload("/assets/upload-bulk", fd, {
+            fd.append("upload_id", uploadId);
+            fd.append("chunk_index", String(chunkIdx));
+            fd.append("total_chunks", String(totalChunks));
+            fd.append("total_size", String(totalSize));
+            fd.append("file", slice, file.name);
+            return apiUpload("/assets/upload-chunk", fd, {
               workspaceId,
               signal: controller.signal,
-              onProgress: (loaded, total) => {
-                batchLoaded[idx] = Math.min(loaded, total || batchTotals[idx]);
+              onProgress: (loaded) => {
+                taskLoaded[taskIdx] = Math.min(totalSize, start + loaded);
                 updateProgress(false);
               },
             });
           }, controller.signal);
 
-          batchLoaded[idx] = batchTotals[idx];
-          uploadedFilesCount += res?.saved ?? batch.length;
-          skippedOnServer += res?.skipped ?? 0;
+          if (finalRes?.skipped) {
+            taskLoaded[taskIdx] = totalSize;
+            return finalRes;
+          }
+          taskLoaded[taskIdx] = end;
+          updateProgress(false);
+        }
+        return finalRes;
+      };
+
+      const worker = async () => {
+        while (true) {
+          if (controller.signal.aborted) return;
+          const idx = nextTaskIndex++;
+          if (idx >= uploadTasks.length) return;
+          const task = uploadTasks[idx];
+
+          let res;
+          if (task.kind === "chunked") {
+            res = await uploadChunkedLargeFile(idx, task.item);
+            taskLoaded[idx] = taskTotals[idx];
+            uploadedFilesCount += res?.saved ?? 1;
+            skippedOnServer += res?.skipped ?? 0;
+          } else {
+            const batch = task.items;
+            res = await runWithRetry(async () => {
+              const fd = new FormData();
+              fd.append("celebrity_name", celebrityName);
+              fd.append("skip_scan", "true");
+              fd.append("skip_existing", "true");
+              for (const { file, relPath } of batch) {
+                fd.append("files", file, relPath || file.webkitRelativePath || file.name);
+              }
+              return apiUpload("/assets/upload-bulk", fd, {
+                workspaceId,
+                signal: controller.signal,
+                onProgress: (loaded, total) => {
+                  taskLoaded[idx] = Math.min(loaded, total || taskTotals[idx]);
+                  updateProgress(false);
+                },
+              });
+            }, controller.signal);
+            taskLoaded[idx] = taskTotals[idx];
+            uploadedFilesCount += res?.saved ?? batch.length;
+            skippedOnServer += res?.skipped ?? 0;
+          }
           updateProgress(true);
         }
       };
 
-      const workerCount = Math.min(VAULT_CONCURRENCY, batches.length);
+      const workerCount = Math.min(VAULT_CONCURRENCY, uploadTasks.length);
       await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
       setVaultJob((cur) => cur && {
@@ -352,15 +428,22 @@ export function UploadProvider({ children }) {
     await executeVaultItems(valid, { celebrityName, preference, controller, startedAt, workspaceId });
   }, [executeVaultItems]);
 
-  const startVaultUploadFromHandle = useCallback(async (dirHandle, { celebrityName = "", preference = "mix_both" } = {}) => {
+  const startVaultUploadFromHandle = useCallback(async (dirHandle, { celebrityName = "", preference = "mix_both", skipPermissionCheck = false } = {}) => {
     if (!dirHandle) return;
-    const ok = await ensureDirectoryPermission(dirHandle);
+    let ok = true;
+    if (!skipPermissionCheck) {
+      try {
+        ok = await ensureDirectoryPermission(dirHandle);
+      } catch {
+        ok = typeof dirHandle.entries === "function";
+      }
+    }
     if (!ok) {
       setVaultJob({
         id: Date.now(),
         title: "Celebrity Clips Sync",
         phase: "error",
-        message: "Folder read permission was denied.",
+        message: "Folder read permission was denied. Try Browse Folder instead.",
         totalFiles: 0,
         totalBytes: 0,
         loadedBytes: 0,
@@ -386,6 +469,10 @@ export function UploadProvider({ children }) {
       startedAt,
       message: `Scanning "${dirHandle.name}"… 0 clips found`,
     });
+
+    // Save handle immediately so 100GB+ folders remain one-click resumable even if stopped early.
+    await saveDirectoryHandle(workspaceKey(), dirHandle, 0);
+    setSavedFolder({ handle: dirHandle, name: dirHandle.name, totalFound: 0, savedAt: Date.now() });
 
     try {
       const valid = await walkDirectoryHandleParallel(

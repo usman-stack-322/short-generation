@@ -4,11 +4,12 @@ import json
 import os
 import secrets
 import shutil
+import string
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
@@ -34,6 +35,7 @@ from app.services.celebrity_vault import (
     ALLOWED_EXTS,
     GENERIC_SUBFOLDERS,
     VIDEO_EXTS,
+    index_vault_files,
     list_celebrity_library,
     scan_celebrity_folder,
     stage_vault_asset_for_draft,
@@ -175,6 +177,116 @@ def _scan_manifest_sizes(root: Path) -> dict[str, int]:
     return files
 
 
+def _is_loopback_request(request: Request | None) -> bool:
+    """True only when HTTP request came directly from the same local machine without remote proxy forwarding."""
+    if request is None:
+        return False
+    if request.headers.get('x-forwarded-for') or request.headers.get('forwarded'):
+        return False
+    host = ((request.client.host if request.client else '') or '').strip().lower()
+    return host in {'127.0.0.1', '::1', 'localhost'}
+
+
+def _local_shortcuts() -> list[dict]:
+    shortcuts: list[dict] = []
+    if os.name == 'nt':
+        try:
+            import ctypes
+            mask = ctypes.windll.kernel32.GetLogicalDrives()
+            get_type = ctypes.windll.kernel32.GetDriveTypeW
+            for idx, letter in enumerate(string.ascii_uppercase):
+                if not (mask & (1 << idx)):
+                    continue
+                drive = f'{letter}:\\'
+                # Include fixed (3) and removable (2) drives without blocking on offline network shares
+                if get_type(drive) in (2, 3):
+                    shortcuts.append({'name': f'Drive ({letter}:)', 'path': drive, 'kind': 'drive'})
+        except Exception:
+            for letter in ('C', 'D', 'E', 'F'):
+                drive = f'{letter}:\\'
+                if os.path.isdir(drive):
+                    shortcuts.append({'name': f'Drive ({letter}:)', 'path': drive, 'kind': 'drive'})
+    else:
+        shortcuts.append({'name': 'Root (/)', 'path': '/', 'kind': 'drive'})
+    home = Path.home()
+    for label in ('Desktop', 'Downloads', 'Documents', 'Videos', 'Pictures'):
+        p = home / label
+        try:
+            if p.is_dir():
+                shortcuts.append({'name': label, 'path': str(p), 'kind': 'home'})
+        except OSError:
+            continue
+    return shortcuts
+
+
+@router.get('/api/assets/local-browse')
+def browse_local_folders(
+    request: Request,
+    path: str = '',
+    context=Depends(require_admin),
+):
+    """Browse directories directly on the local machine for zero-copy 100GB+ folder linking."""
+    if not _is_loopback_request(request):
+        raise HTTPException(
+            403,
+            'Direct disk browsing is only available when the backend runs locally on this computer. Use People & Clips Sync to upload.',
+        )
+    shortcuts = _local_shortcuts()
+    raw = path.strip()
+    if not raw:
+        return {
+            'current_path': '',
+            'parent_path': '',
+            'folders': [s for s in shortcuts if s['kind'] == 'drive'],
+            'shortcuts': shortcuts,
+            'direct_media_count': 0,
+        }
+
+    target = Path(raw).expanduser()
+    if os.name == 'nt' and len(raw) == 2 and raw[1] == ':':
+        target = Path(raw + '\\')
+    try:
+        resolved = target.resolve()
+    except OSError as exc:
+        raise HTTPException(422, f'Invalid folder path: {exc}') from None
+    if not resolved.exists() or not resolved.is_dir():
+        raise HTTPException(404, f'Folder not found: {resolved}')
+
+    folders: list[dict] = []
+    direct_media_count = 0
+    try:
+        with os.scandir(resolved) as it:
+            for entry in it:
+                name = entry.name
+                if name.startswith('$') or name.startswith('.tmp_'):
+                    continue
+                if name.lower() in {'system volume information', 'recovery'}:
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if not name.startswith('.'):
+                            folders.append({'name': name, 'path': entry.path, 'kind': 'folder'})
+                    elif entry.is_file(follow_symlinks=False):
+                        if os.path.splitext(name)[1].lower() in ALLOWED_EXTS:
+                            direct_media_count += 1
+                except OSError:
+                    continue
+    except PermissionError:
+        raise HTTPException(403, f'Permission denied reading folder: {resolved}') from None
+    except OSError as exc:
+        raise HTTPException(422, f'Unable to read folder: {exc}') from None
+
+    folders.sort(key=lambda item: item['name'].lower())
+    parent = str(resolved.parent) if resolved.parent != resolved else ''
+    return {
+        'current_path': str(resolved),
+        'parent_path': parent,
+        'folders': folders[:500],
+        'shortcuts': shortcuts,
+        'direct_media_count': direct_media_count,
+    }
+
+
 @router.get('/api/assets/manifest')
 def get_vault_manifest(
     context=Depends(require_admin),
@@ -238,6 +350,7 @@ def upload_bulk(
     root, folder_row = _vault_root(db, workspace_id)
     saved = 0
     skipped = 0
+    saved_paths: list[Path] = []
     for f in files:
         try:
             out_path = _resolve_vault_target(root, f.filename or 'asset', celebrity_name)
@@ -246,6 +359,7 @@ def upload_bulk(
             file_size = getattr(f, 'size', None) or 0
             if skip_existing and file_size > 0 and out_path.is_file() and out_path.stat().st_size == file_size:
                 skipped += 1
+                saved_paths.append(out_path)
                 continue
             out_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = out_path.with_name(f'.tmp_{uuid4().hex[:8]}_{out_path.name}')
@@ -257,6 +371,7 @@ def upload_bulk(
                     continue
                 os.replace(tmp_path, out_path)
                 saved += 1
+                saved_paths.append(out_path)
             except Exception:
                 tmp_path.unlink(missing_ok=True)
                 raise
@@ -268,9 +383,85 @@ def upload_bulk(
     if saved == 0 and skipped == 0 and not skip_scan:
         raise HTTPException(422, 'No supported image (.jpg/.png/.webp) or video (.mp4/.mov/.webm) files uploaded.')
     if skip_scan:
+        if saved_paths:
+            index_vault_files(db, workspace_id, root, saved_paths)
         return {'saved': saved, 'skipped': skipped, 'scanning': False, 'folder_path': str(root)}
     summary = scan_celebrity_folder(db, workspace_id, str(root), folder_row.preference if folder_row else 'mix_both')
     return {**summary, 'saved': saved, 'skipped': skipped}
+
+
+@router.post('/api/assets/upload-chunk')
+def upload_vault_chunk(
+    relative_path: str = Form(..., min_length=1, max_length=1000),
+    celebrity_name: str = Form(''),
+    upload_id: str = Form(..., min_length=4, max_length=80),
+    chunk_index: int = Form(..., ge=0),
+    total_chunks: int = Form(..., ge=1, le=50000),
+    total_size: int = Form(..., ge=1),
+    file: UploadFile = File(...),
+    context=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Receive large video clips in resumable chunks so 100GB+ uploads work reliably without proxy timeouts."""
+    workspace_id = context[1].workspace_id
+    root, _ = _vault_root(db, workspace_id)
+    out_path = _resolve_vault_target(root, relative_path, celebrity_name)
+    if not out_path:
+        try:
+            file.file.close()
+        except Exception:
+            pass
+        raise HTTPException(422, 'Unsupported media extension or invalid relative path.')
+
+    if out_path.is_file() and out_path.stat().st_size == total_size:
+        try:
+            file.file.close()
+        except Exception:
+            pass
+        index_vault_files(db, workspace_id, root, [out_path])
+        return {'saved': 0, 'skipped': 1, 'completed': True, 'folder_path': str(root)}
+
+    safe_id = ''.join(ch for ch in upload_id if ch.isalnum() or ch in '-_')[:64] or uuid4().hex
+    stage_dir = root / '.tmp_chunks' / f'{workspace_id[:12]}_{safe_id}'
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    chunk_file = stage_dir / f'c_{chunk_index:06d}'
+    chunk_tmp = stage_dir / f'c_{chunk_index:06d}.tmp'
+    try:
+        with chunk_tmp.open('wb') as dst:
+            shutil.copyfileobj(file.file, dst, length=1024 * 1024)
+        os.replace(chunk_tmp, chunk_file)
+    except Exception:
+        chunk_tmp.unlink(missing_ok=True)
+        raise
+    finally:
+        try:
+            file.file.close()
+        except Exception:
+            pass
+
+    all_chunks = [stage_dir / f'c_{idx:06d}' for idx in range(total_chunks)]
+    if not all(p.is_file() for p in all_chunks):
+        return {'saved': 0, 'skipped': 0, 'completed': False, 'chunk_index': chunk_index, 'folder_path': str(root)}
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    assembled_tmp = out_path.with_name(f'.tmp_{uuid4().hex[:8]}_{out_path.name}')
+    try:
+        with assembled_tmp.open('wb') as out_dst:
+            for part in all_chunks:
+                with part.open('rb') as src_part:
+                    shutil.copyfileobj(src_part, out_dst, length=1024 * 1024)
+        if assembled_tmp.stat().st_size <= 0:
+            assembled_tmp.unlink(missing_ok=True)
+            raise HTTPException(422, 'Uploaded chunked file was empty.')
+        os.replace(assembled_tmp, out_path)
+    except Exception:
+        assembled_tmp.unlink(missing_ok=True)
+        raise
+    finally:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+
+    index_vault_files(db, workspace_id, root, [out_path])
+    return {'saved': 1, 'skipped': 0, 'completed': True, 'folder_path': str(root)}
 
 
 @router.get('/api/assets/vault/{asset_id}/file')
