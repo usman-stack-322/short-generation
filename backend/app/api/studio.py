@@ -486,6 +486,7 @@ async def upload_scene_media(
     project_id: str,
     scene_index: int,
     vault_asset_id: str = Form(''),
+    celebrity_name: str = Form(''),
     file: UploadFile | None = File(None),
     context=Depends(require_editor),
     db: Session = Depends(get_db),
@@ -514,23 +515,25 @@ async def upload_scene_media(
         if ext not in ALLOWED_EXTS:
             raise HTTPException(422, 'Upload a supported image (.jpg/.png/.webp) or short video clip (.mp4/.mov/.webm).')
         body = await file.read()
-        if not body or len(body) > 100 * 1024 * 1024:
-            raise HTTPException(422, 'Uploaded file is empty or exceeds 100 MB.')
+        if not body or len(body) > 250 * 1024 * 1024:
+            raise HTTPException(422, 'Uploaded file is empty or exceeds 250 MB.')
         out_path = folder / f'manual_s{scene_index}_{uuid4().hex[:10]}{ext}'
         out_path.write_bytes(body)
         media_type = 'video' if ext in VIDEO_EXTS else 'image'
+        clean_celeb = celebrity_name.strip()
         new_asset = {
             'path': str(out_path),
             'hash': hashlib.sha256(body).hexdigest(),
             'source_url': '',
-            'creator': context[0].name,
-            'license': 'Manual Scene Upload',
+            'creator': clean_celeb or context[0].name,
+            'license': 'Connected Local Celebrity Folder' if clean_celeb else 'Manual Scene Upload',
             'license_url': '',
-            'credit': f'Uploaded for Scene {scene_index}: {file.filename}',
-            'kind': 'manual_clip' if media_type == 'video' else 'manual_photo',
+            'credit': f'{clean_celeb} ({file.filename})' if clean_celeb else f'Uploaded for Scene {scene_index}: {file.filename}',
+            'kind': ('celebrity_clip' if media_type == 'video' else 'celebrity_photo') if clean_celeb else ('manual_clip' if media_type == 'video' else 'manual_photo'),
             'media_type': media_type,
-            'provider': 'manual_upload',
-            'note': f'Manually uploaded {media_type} ({file.filename}).',
+            'provider': 'celebrity_vault' if clean_celeb else 'manual_upload',
+            **({'celebrity_name': clean_celeb} if clean_celeb else {}),
+            'note': f'Local celebrity {media_type} from connected folder ({clean_celeb}).' if clean_celeb else f'Manually uploaded {media_type} ({file.filename}).',
         }
     else:
         raise HTTPException(422, 'Provide either a file upload or vault_asset_id.')

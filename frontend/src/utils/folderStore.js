@@ -30,6 +30,7 @@ function toTitleCase(str) {
 
 function cleanFolderName(raw) {
   let s = String(raw || "")
+    .replace(/[-_\s]*20\d{6}T\d{6}Z(?:[-_0-9]+)?$/i, "")
     .replace(/[→←•|]+/g, " ")
     .replace(/_/g, " ")
     .replace(/\s*-\s*/g, " ")
@@ -492,4 +493,291 @@ export async function walkDirectoryHandleParallel(dirHandle, onProgress, signal)
   }
   if (onProgress) onProgress(items.length);
   return items;
+}
+
+const NON_PERSON_WORDS = new Set([
+  "clash", "clashes", "commentary", "analysis", "highlights", "highlight", "arena",
+  "studio", "podcast", "podcasts", "show", "debate", "debates", "media", "discussion",
+  "discussions", "court", "floor", "desk", "room", "basketball", "football", "baseball",
+  "soccer", "boxing", "ufc", "nba", "wnba", "nfl", "mlb", "ncaa", "news", "report",
+  "reports", "story", "history", "timeline", "moment", "moments", "scene", "clip",
+  "clips", "video", "videos", "photo", "photos", "image", "images", "picture", "crowd",
+  "fans", "panel", "host", "microphone", "microphones", "mic", "interview", "interviews",
+  "conference", "press", "game", "games", "series", "finals", "season", "league",
+  "championship", "trophy", "ring", "rings", "award", "awards", "ceremony", "hall",
+  "fame", "star", "stars", "legend", "legends", "player", "players", "coach", "coaches",
+  "team", "teams", "club", "city", "state", "street", "house", "building", "screen",
+  "setup", "reaction", "reactions", "impact", "drama", "beef", "feud", "battle", "fight",
+]);
+
+const NICKNAME_ALIASES = {
+  "nick young": ["swaggy p", "swaggyp"],
+  "stephen curry": ["steph curry", "steph"],
+  "lebron james": ["king james", "bron", "lebron"],
+  "shaquille o neal": ["shaq", "shaquille oneal"],
+  "shaquille oneal": ["shaq", "shaquille o neal"],
+  "iman shumpert": ["shump", "shumpert"],
+  "gilbert arenas": ["agent zero", "gils arena", "gil arenas"],
+  "joe budden": ["budden"],
+  "carmelo anthony": ["melo"],
+  "charles barkley": ["chuck", "barkley"],
+  "stephen a smith": ["stephen a", "stephen smith"],
+  "shannon sharpe": ["unc", "shannon"],
+  "kevin durant": ["kd"],
+  "allen iverson": ["iverson"],
+  "michael jordan": ["jordan"],
+  "kobe bryant": ["kobe", "mamba"],
+  "draymond green": ["draymond"],
+  "kyrie irving": ["kyrie"],
+  "giannis antetokounmpo": ["giannis"],
+  "nikola jokic": ["jokic"],
+  "luka doncic": ["luka"],
+};
+
+export function normVaultEntity(text) {
+  let t = String(text || "");
+  try {
+    t = t.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  } catch {}
+  t = t
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/\$/g, "s")
+    .replace(/\b([A-Za-z])\./g, "$1")
+    .replace(/'s\b/gi, " ");
+  return (t.toLowerCase().match(/[a-z0-9]+/g) || []).join(" ");
+}
+
+function hasNormPhrase(normHaystack, phrase) {
+  if (!phrase || phrase.length < 3 || !normHaystack) return false;
+  const padded = ` ${normHaystack} `;
+  return padded.includes(` ${phrase} `);
+}
+
+function editSimilarity(a, b) {
+  if (a === b) return 1;
+  if (!a || !b) return 0;
+  const la = a.length;
+  const lb = b.length;
+  if (Math.abs(la - lb) > 3) return 0;
+  const dp = Array.from({ length: lb + 1 }, (_, j) => j);
+  for (let i = 1; i <= la; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= lb; j++) {
+      const temp = dp[j];
+      dp[j] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, dp[j], dp[j - 1]);
+      prev = temp;
+    }
+  }
+  return 1 - dp[lb] / Math.max(la, lb);
+}
+
+function buildCelebVariants(celebName) {
+  const base = normVaultEntity(celebName);
+  if (!base || base.length < 3 || GENERIC_SUBFOLDERS.has(base)) return [];
+  const variants = [base];
+  const compact = normVaultEntity(String(celebName || "").replace(/([A-Za-z])['’]([A-Za-z])/g, "$1$2"));
+  if (compact && !variants.includes(compact)) variants.push(compact);
+  const tokens = base.split(" ");
+  if (tokens.length >= 3 && tokens.slice(1, -1).some((t) => t.length === 1)) {
+    const noMid = tokens.filter((t, idx) => !(idx > 0 && idx < tokens.length - 1 && t.length === 1)).join(" ");
+    if (noMid && !variants.includes(noMid)) variants.push(noMid);
+  }
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i].length === 1 && tokens[i + 1].length >= 2) {
+      const joined = [...tokens.slice(0, i), tokens[i] + tokens[i + 1], ...tokens.slice(i + 2)].join(" ");
+      if (joined && !variants.includes(joined)) variants.push(joined);
+    }
+  }
+  for (const v of [...variants]) {
+    for (const alias of NICKNAME_ALIASES[v] || []) {
+      const na = normVaultEntity(alias);
+      if (na && !variants.includes(na)) variants.push(na);
+    }
+  }
+  return variants;
+}
+
+export function matchCelebrityClipFromMap(byCeleb, scene, optionsOrPeople = [], legacyPreference = "mix_both", legacyUsedRels = new Set()) {
+  if (!byCeleb || byCeleb.size === 0) return null;
+
+  const opts = Array.isArray(optionsOrPeople)
+    ? {
+        people: optionsOrPeople,
+        allScenes: [],
+        draftTitle: "",
+        preference: legacyPreference || "mix_both",
+        usedRelKeys: legacyUsedRels || new Set(),
+        usedCelebCounts: new Map(),
+        lastMatchedCelebrity: "",
+      }
+    : {
+        people: optionsOrPeople?.people || [],
+        allScenes: optionsOrPeople?.allScenes || [],
+        draftTitle: optionsOrPeople?.draftTitle || "",
+        preference: optionsOrPeople?.preference || "mix_both",
+        usedRelKeys: optionsOrPeople?.usedRelKeys || new Set(),
+        usedCelebCounts: optionsOrPeople?.usedCelebCounts || new Map(),
+        lastMatchedCelebrity: optionsOrPeople?.lastMatchedCelebrity || "",
+      };
+
+  const narrationNorm = normVaultEntity(scene?.narration || "");
+  const visualNorm = normVaultEntity(
+    [scene?.on_screen_text || "", scene?.visual_description || "", scene?.image_query || ""].join(" ")
+  );
+  const sceneNorm = `${narrationNorm} ${visualNorm}`.trim();
+  const sceneTokens = new Set(sceneNorm.split(" ").filter(Boolean));
+
+  const scriptParts = [
+    opts.draftTitle || "",
+    ...(opts.people || []),
+    ...(opts.allScenes || []).map((s) =>
+      [s?.narration || "", s?.on_screen_text || "", s?.visual_description || "", s?.image_query || ""].join(" ")
+    ),
+  ];
+  const scriptNorm = normVaultEntity(scriptParts.join(" ")) || sceneNorm;
+  const scriptTokens = new Set(scriptNorm.split(" ").filter(Boolean));
+
+  const celebMeta = [];
+  const surnameCounts = new Map();
+  const firstnameCounts = new Map();
+
+  for (const [celebKey, items] of byCeleb.entries()) {
+    if (!items || !items.length) continue;
+    const displayCeleb = items[0]?.celebrity_name || celebKey;
+    const variants = buildCelebVariants(displayCeleb);
+    if (!variants.length) continue;
+    const normName = variants[0];
+    const tokens = normName.split(" ").filter(Boolean);
+    const firstname = tokens.length >= 2 && tokens[0].length >= 4 && !NON_PERSON_WORDS.has(tokens[0]) ? tokens[0] : "";
+    const surname =
+      tokens.length >= 2 && tokens[tokens.length - 1].length >= 4 && !NON_PERSON_WORDS.has(tokens[tokens.length - 1])
+        ? tokens[tokens.length - 1]
+        : "";
+    if (firstname) firstnameCounts.set(firstname, (firstnameCounts.get(firstname) || 0) + 1);
+    if (surname) surnameCounts.set(surname, (surnameCounts.get(surname) || 0) + 1);
+    celebMeta.push({ celebKey, displayCeleb, normName, tokens, variants, firstname, surname, items });
+  }
+
+  function scoreCelebAgainstText(meta, primaryText, secondaryText, tokenSet) {
+    for (const v of meta.variants) {
+      if (hasNormPhrase(primaryText, v)) {
+        const idx = primaryText.indexOf(v);
+        const posBonus = idx >= 0 ? Math.max(0, 24 - Math.floor(idx / 10)) : 0;
+        return 320 + posBonus;
+      }
+    }
+    for (const v of meta.variants) {
+      if (hasNormPhrase(secondaryText, v)) {
+        return 270;
+      }
+    }
+    if (meta.tokens.length >= 2 && meta.tokens.every((t) => tokenSet.has(t))) {
+      return 240;
+    }
+    const uniqueSurname = meta.surname && (surnameCounts.get(meta.surname) === 1 || (meta.firstname && scriptTokens.has(meta.firstname)));
+    const uniqueFirstname = meta.firstname && (firstnameCounts.get(meta.firstname) === 1 || (meta.surname && scriptTokens.has(meta.surname)));
+
+    if (uniqueSurname && hasNormPhrase(primaryText, meta.surname)) return 220;
+    if (uniqueFirstname && hasNormPhrase(primaryText, meta.firstname)) return 210;
+    if (uniqueSurname && hasNormPhrase(secondaryText, meta.surname)) return 185;
+    if (uniqueFirstname && hasNormPhrase(secondaryText, meta.firstname)) return 175;
+
+    // Fuzzy token match for minor spelling differences (e.g. Reeves vs Reaves)
+    if (meta.tokens.length >= 2) {
+      const words = Array.from(tokenSet).filter((w) => w.length >= 4 && !NON_PERSON_WORDS.has(w));
+      const firstHit = words.some((w) => editSimilarity(w, meta.tokens[0]) >= 0.84);
+      const lastHit = words.some((w) => editSimilarity(w, meta.tokens[meta.tokens.length - 1]) >= 0.84);
+      if (firstHit && lastHit) return 200;
+    }
+    return 0;
+  }
+
+  // Pass 1: Match celebrity mentioned directly in THIS scene's script/narration/visuals
+  let matchedCelebs = [];
+  for (const meta of celebMeta) {
+    const sc = scoreCelebAgainstText(meta, narrationNorm, visualNorm, sceneTokens);
+    if (sc > 0) {
+      matchedCelebs.push({ meta, celebScore: sc });
+    }
+  }
+
+  // Pass 2: If no celebrity in the vault matched this specific scene (or the scene's person is not in the folder),
+  // fall back to the celebrity(s) from the overall Script / Title so we add another clip of that same person!
+  if (matchedCelebs.length === 0) {
+    const lastNorm = normVaultEntity(opts.lastMatchedCelebrity || "");
+    for (const meta of celebMeta) {
+      let sc = scoreCelebAgainstText(meta, scriptNorm, "", scriptTokens);
+      if (sc <= 0 && lastNorm && meta.normName === lastNorm) {
+        sc = 180;
+      }
+      if (sc > 0) {
+        const sameAsLastBonus = lastNorm && meta.normName === lastNorm ? 25 : 0;
+        matchedCelebs.push({ meta, celebScore: 150 + sameAsLastBonus });
+      }
+    }
+  }
+
+  if (matchedCelebs.length === 0) return null;
+
+  const sceneNum = Number(scene?.number || 1);
+  const pref = opts.preference || "mix_both";
+  let bestItem = null;
+  let bestScore = -Infinity;
+
+  for (const { meta, celebScore } of matchedCelebs) {
+    const priorUses = opts.usedCelebCounts.get(meta.celebKey) || 0;
+    const adjustedCelebScore = celebScore - Math.min(45, priorUses * 14);
+
+    for (let idx = 0; idx < meta.items.length; idx++) {
+      const item = meta.items[idx];
+      let score = adjustedCelebScore;
+
+      if (pref === "prefer_images") {
+        if (item.media_type === "image") score += 35;
+      } else if (pref === "prefer_clips") {
+        if (item.media_type === "video") score += 45;
+      } else {
+        // Default "mix_both": favor video clips of the person while still allowing images
+        score += item.media_type === "video" ? 28 : 12;
+      }
+
+      // Mood & filename keyword alignment (bonus when found; when not found, still picks another clip of this person!)
+      for (const m of item.mood_tags || []) {
+        if (sceneTokens.has(m)) score += 25;
+      }
+      const stemWords = normVaultEntity(String(item.file_name || "").replace(/\.[^.]+$/, "")).split(" ");
+      for (const sw of stemWords) {
+        if (sw.length >= 4 && !meta.tokens.includes(sw) && sceneTokens.has(sw)) {
+          score += 15;
+        }
+      }
+
+      // Strongly prefer unused clips of this person, and if all clips were used, rotate cleanly instead of failing!
+      if (!opts.usedRelKeys.has(item.relKey)) {
+        score += 110;
+      } else {
+        score -= 35;
+      }
+
+      const fileSize = item.file?.size || 0;
+      if (fileSize > 0 && fileSize <= 50 * 1024 * 1024) {
+        score += 10;
+      } else if (fileSize > 180 * 1024 * 1024) {
+        score -= 30;
+      }
+
+      // Deterministic rotation tie-breaker so multiple scenes of the same person pick distinct clips
+      const rotationTie = ((sceneNum * 37 + idx * 13) % Math.max(1, meta.items.length)) / Math.max(1, meta.items.length);
+      score += rotationTie * 4;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestItem = item;
+      }
+    }
+  }
+
+  return bestItem;
 }

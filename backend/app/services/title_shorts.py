@@ -563,15 +563,20 @@ def collect_one(draft,scene,existing):
     # Priority 1: Connected Local Celebrity Asset Folder (images + short video clips)
     try:
         from app.services.celebrity_vault import match_celebrity_asset
+        script_scenes = (data.get('plan') or {}).get('scenes') or []
+        full_script_text = ' '.join(
+            f"{s.get('narration', '')} {s.get('on_screen_text', '')} {s.get('visual_description', '')}"
+            for s in script_scenes
+        ).strip()
         with SessionLocal() as db:
             vault_asset = match_celebrity_asset(
                 db, draft.workspace_id, scene, folder,
-                draft_title=draft.title,
+                draft_title=f'{draft.title} {full_script_text}'.strip(),
                 people=list(dict.fromkeys(((data.get('lead') or {}).get('people') or []) + ((data.get('analysis') or {}).get('people') or []))),
                 existing=existing,
                 preference=data.get('media_preference'),
             )
-        if vault_asset and vault_asset['hash'] not in used:
+        if vault_asset:
             return vault_asset
     except Exception as exc:
         failures.append(type(exc).__name__)

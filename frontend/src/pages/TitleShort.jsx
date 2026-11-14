@@ -45,6 +45,7 @@ export default function TitleShort() {
     localVaultIndex,
     getLocalPreviewUrl,
     getLocalFile,
+    ensureLocalVaultFiles,
     matchLocalFileForScene,
   } = useUploads();
   useEffect(()=>{api('/assets/library').then(setVaultLibrary).catch(()=>{});},[id, vaultVersion]);
@@ -102,55 +103,216 @@ export default function TitleShort() {
     return()=>{live=false;clearInterval(timer);};
   },[draft?.id,draft?.status]);
 
+  const usedRelsBySceneRef = useRef(new Map());
+
+  async function attachScriptVaultClips(targetDraft, { replaceExisting = false, interactive = false } = {}) {
+    if (!targetDraft?.scenes?.length) return { latestDraft: targetDraft, matchedCount: 0 };
+    await ensureLocalVaultFiles(interactive);
+
+    const storyPeople = Array.from(
+      new Set([
+        ...(targetDraft.lead?.people || []),
+        ...(targetDraft.analysis?.people || []),
+      ].filter(Boolean))
+    );
+    const allScenes = (targetDraft.scenes || []).map((s, idx) => ({
+      ...s,
+      narration: texts[idx] ?? s.narration,
+    }));
+
+    const usedRels = new Set();
+    const usedCelebCounts = new Map();
+    let lastMatchedCelebrity = '';
+    let latestDraft = targetDraft;
+    let matchedCount = 0;
+
+    // Pre-scan script to find primary celebrity in case Scene 1 is a hook sentence without a name
+    for (const sc of allScenes) {
+      const probe = matchLocalFileForScene(sc, {
+        people: storyPeople,
+        allScenes,
+        draftTitle: targetDraft.title,
+        preference: targetDraft.media_preference || 'mix_both',
+      });
+      if (probe?.celebrity_name) {
+        lastMatchedCelebrity = probe.celebrity_name;
+        break;
+      }
+    }
+
+    for (let idx = 0; idx < allScenes.length; idx++) {
+      const sc = allScenes[idx];
+      const isLocked = targetDraft.scene_locks?.includes(sc.number);
+      if (isLocked) continue;
+
+      const hasVaultOrManual =
+        sc.preview_url &&
+        (sc.asset?.provider === 'celebrity_vault' || sc.asset?.provider === 'manual_upload');
+
+      if (!replaceExisting && sc.preview_url && hasVaultOrManual) {
+        const prevRel = usedRelsBySceneRef.current.get(`${targetDraft.id}:${sc.number}`);
+        if (prevRel) usedRels.add(prevRel);
+        if (sc.asset?.celebrity_name) {
+          const cKey = sc.asset.celebrity_name.toLowerCase();
+          usedCelebCounts.set(cKey, (usedCelebCounts.get(cKey) || 0) + 1);
+          lastMatchedCelebrity = sc.asset.celebrity_name;
+        }
+        continue;
+      }
+      if (!replaceExisting && sc.preview_url) continue;
+
+      const matched = matchLocalFileForScene(sc, {
+        people: storyPeople,
+        allScenes,
+        draftTitle: targetDraft.title,
+        preference: targetDraft.media_preference || 'mix_both',
+        usedRelKeys: usedRels,
+        usedCelebCounts,
+        lastMatchedCelebrity,
+      });
+
+      if (matched?.file && matched.file.size <= 240 * 1024 * 1024) {
+        usedRels.add(matched.relKey);
+        usedRelsBySceneRef.current.set(`${targetDraft.id}:${sc.number}`, matched.relKey);
+        const cKey = (matched.celebrity_name || '').toLowerCase();
+        if (cKey) {
+          usedCelebCounts.set(cKey, (usedCelebCounts.get(cKey) || 0) + 1);
+          lastMatchedCelebrity = matched.celebrity_name;
+        }
+        try {
+          const fd = new FormData();
+          fd.append('file', matched.file);
+          if (matched.celebrity_name) fd.append('celebrity_name', matched.celebrity_name);
+          latestDraft = await api('/projects/' + targetDraft.id + '/scenes/' + sc.number + '/upload-media', {
+            method: 'POST',
+            body: fd,
+          });
+          matchedCount += 1;
+          setDraft(latestDraft);
+        } catch {}
+      }
+    }
+
+    return { latestDraft, matchedCount };
+  }
+
   // Automatically attach local Celebrity Folder clips/photos on-demand and fetch remaining visuals in script_review.
   useEffect(()=>{
     if(!draft||draft.status!=='script_review'||draft.media_mode==='local'||draft.error_message||busy)return;
-    if(!draft.scenes?.some(s=>!s.preview_url))return;
-    const key=draft.id+':'+draft.revision;
+    const needsVisuals = draft.scenes?.some(s=>!s.preview_url);
+    const needsLocalUpgrade =
+      Boolean(localVaultIndex?.celebrities?.length) &&
+      draft.scenes?.some(s => s.preview_url && s.asset?.provider !== 'celebrity_vault' && s.asset?.provider !== 'manual_upload');
+    if(!needsVisuals && !needsLocalUpgrade)return;
+
+    const key = `${draft.id}:${draft.revision}:v${vaultVersion}`;
     if(visualsRequested.current.has(key))return;
     visualsRequested.current.add(key);
 
     (async () => {
       try {
-        const usedRels = new Set();
-        let latestDraft = draft;
-        for (const sc of draft.scenes || []) {
-          if (sc.preview_url) continue;
-          const matched = matchLocalFileForScene(
-            sc,
-            [draft.title],
-            draft.media_preference || 'mix_both',
-            usedRels
-          );
-          if (matched?.file && matched.file.size <= 95 * 1024 * 1024) {
-            usedRels.add(matched.relKey);
-            try {
-              const fd = new FormData();
-              fd.append('file', matched.file);
-              latestDraft = await api('/projects/' + draft.id + '/scenes/' + sc.number + '/upload-media', {
-                method: 'POST',
-                body: fd,
-              });
-              setDraft(latestDraft);
-            } catch {}
-          }
-        }
+        const { latestDraft } = await attachScriptVaultClips(draft, {
+          replaceExisting: needsLocalUpgrade && !needsVisuals,
+          interactive: false,
+        });
         if (latestDraft?.scenes?.some((s) => !s.preview_url)) {
           await action('/' + draft.id + '/visuals', { revision: latestDraft.revision });
         }
       } catch {}
     })();
-  },[draft?.id,draft?.status,draft?.revision,draft?.media_mode,draft?.error_message,busy,matchLocalFileForScene]);
+  },[draft?.id,draft?.status,draft?.revision,draft?.media_mode,draft?.error_message,busy,vaultVersion,localVaultIndex,matchLocalFileForScene]);
 
-  async function uploadSceneMedia(sceneNumber, file, vaultAssetId='') {
+  async function uploadSceneMedia(sceneNumber, file, vaultAssetId='', celebrityName='') {
     setBusy(true); setError('');
     try {
       const fd = new FormData();
       if (file) fd.append('file', file);
       if (vaultAssetId) fd.append('vault_asset_id', vaultAssetId);
+      if (celebrityName) fd.append('celebrity_name', celebrityName);
       const row = await api('/projects/'+id+'/scenes/'+sceneNumber+'/upload-media', { method: 'POST', body: fd });
       setDirty(false); setDraft(row); setVaultPickerScene(null);
     } catch(e) { setError(e.message); } finally { setBusy(false); }
+  }
+
+  async function regenerateSceneFromScriptOrBackend(scene, sceneIdx) {
+    if (!draft) return;
+    setBusy(true);
+    setError('');
+    try {
+      await ensureLocalVaultFiles(true);
+      const storyPeople = Array.from(
+        new Set([
+          ...(draft.lead?.people || []),
+          ...(draft.analysis?.people || []),
+        ].filter(Boolean))
+      );
+      const allScenes = (draft.scenes || []).map((s, idx) => ({
+        ...s,
+        narration: texts[idx] ?? s.narration,
+      }));
+      const usedRels = new Set();
+      for (const s of draft.scenes || []) {
+        const rk = usedRelsBySceneRef.current.get(`${draft.id}:${s.number}`);
+        if (rk) usedRels.add(rk);
+      }
+      const dirText = (instructions[sceneIdx] || '').trim();
+      const targetScene = {
+        ...allScenes[sceneIdx],
+        visual_description: [allScenes[sceneIdx]?.visual_description || '', dirText].filter(Boolean).join(' '),
+      };
+      const matched = matchLocalFileForScene(targetScene, {
+        people: storyPeople,
+        allScenes,
+        draftTitle: draft.title,
+        preference: draft.media_preference || 'mix_both',
+        usedRelKeys: usedRels,
+        lastMatchedCelebrity: scene.asset?.celebrity_name || '',
+      });
+      if (matched?.file && matched.file.size <= 240 * 1024 * 1024) {
+        usedRelsBySceneRef.current.set(`${draft.id}:${scene.number}`, matched.relKey);
+        const fd = new FormData();
+        fd.append('file', matched.file);
+        if (matched.celebrity_name) fd.append('celebrity_name', matched.celebrity_name);
+        const row = await api('/projects/' + id + '/scenes/' + scene.number + '/upload-media', {
+          method: 'POST',
+          body: fd,
+        });
+        setDirty(false);
+        setDraft(row);
+        return;
+      }
+      await action('/' + id + '/scenes/' + scene.number + '/regenerate', {
+        revision: draft.revision,
+        instruction: dirText,
+      });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncScriptVisualsManual() {
+    if (!draft) return;
+    setBusy(true);
+    setError('');
+    setReviewNotice('');
+    try {
+      const { latestDraft, matchedCount } = await attachScriptVaultClips(draft, {
+        replaceExisting: true,
+        interactive: true,
+      });
+      if (matchedCount > 0) {
+        setReviewNotice(`Matched ${matchedCount} scene${matchedCount === 1 ? '' : 's'} with celebrity clips from your folder according to the script.`);
+      }
+      if (latestDraft?.scenes?.some((s) => !s.preview_url)) {
+        await action('/' + draft.id + '/visuals', { revision: latestDraft.revision });
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function renderShort() {
@@ -182,6 +344,7 @@ export default function TitleShort() {
 
   async function create(event){
     event.preventDefault();
+    ensureLocalVaultFiles(true).catch(() => {});
     const payload={...form,source_urls:sourceText.split(/\n/).map(s=>s.trim()).filter(Boolean)};
     const fingerprint=JSON.stringify(payload);
     if(request.current?.fingerprint!==fingerprint)request.current={fingerprint,id:crypto.randomUUID()};
@@ -511,6 +674,15 @@ export default function TitleShort() {
               <Button
                 variant="secondary"
                 type="button"
+                disabled={running||dirty}
+                onClick={syncScriptVisualsManual}
+              >
+                <Film size={14} />
+                <span>Match Clips to Script</span>
+              </Button>
+              <Button
+                variant="secondary"
+                type="button"
                 onClick={() => {
                   navigator.clipboard?.writeText(combinedScript).then(() => setReviewNotice('Copied generated script to clipboard.')).catch(() => {});
                 }}
@@ -584,7 +756,7 @@ export default function TitleShort() {
                 </div>
 
                 <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-                  <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/regenerate',{revision:draft.revision,instruction:instructions[i]||''})}>Regenerate visual</Button>
+                  <Button variant="secondary" disabled={running||dirty} onClick={()=>regenerateSceneFromScriptOrBackend(scene, i)}>Regenerate visual</Button>
                   <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/rewrite',{revision:draft.revision,instruction:instructions[i]||''})}>Rewrite scene</Button>
                   <Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,locked:!draft.scene_locks?.includes(scene.number)},'PUT')}>{draft.scene_locks?.includes(scene.number)?'Unlock':'Lock'}</Button>
                   {i>0&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/scenes/'+scene.number+'/local-image',{revision:draft.revision,swap_with:scene.number-1},'PUT')}>Move earlier</Button>}
@@ -631,8 +803,8 @@ export default function TitleShort() {
           </div>
 
           <div className="title-short-actions" style={{alignItems:'center'}}>
-            <Button variant="secondary" disabled={running||!dirty} onClick={()=>action('/'+id+'/script',{revision:draft.revision,narrations:texts},'PUT')}>Save script edits</Button>
-            {draft.media_mode!=='local'&&draft.scenes.some(s=>!s.preview_url)&&<Button variant="secondary" disabled={running||dirty} onClick={()=>action('/'+id+'/visuals',{revision:draft.revision})}>Fetch real photos / clips</Button>}
+            <Button variant="secondary" disabled={running||!dirty} onClick={async()=>{const updated=await action('/'+id+'/script',{revision:draft.revision,narrations:texts},'PUT');if(updated)await attachScriptVaultClips(updated,{replaceExisting:true,interactive:true});}}>Save script edits</Button>
+            {draft.media_mode!=='local'&&<Button variant="secondary" disabled={running||dirty} onClick={syncScriptVisualsManual}>Match Clips to Script</Button>}
             <Button disabled={running||dirty||['failed','in_progress'].includes(draft.research_state)} onClick={renderShort}>
               {running&&['validating','visuals','voiceover','rendering'].includes(draft?.status)?`Rendering (${draft.status} · ${elapsedSec}s)…`:'Render 9:16 Short'}
             </Button>
@@ -751,9 +923,9 @@ export default function TitleShort() {
                         onClick={()=>{
                           const localFile = a.relKey ? getLocalFile(a.relKey) : null;
                           if (localFile) {
-                            uploadSceneMedia(vaultPickerScene, localFile, '');
+                            uploadSceneMedia(vaultPickerScene, localFile, '', a.celebrity_name || c.celebrity_name);
                           } else if (a.id && !String(a.id).startsWith('local:')) {
-                            uploadSceneMedia(vaultPickerScene, null, a.id);
+                            uploadSceneMedia(vaultPickerScene, null, a.id, a.celebrity_name || c.celebrity_name);
                           }
                         }}
                       >

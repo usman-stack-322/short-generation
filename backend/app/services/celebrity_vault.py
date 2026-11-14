@@ -629,7 +629,9 @@ def match_celebrity_asset(
 
     vault_variants: dict[str, list[str]] = {}
     surname_owners: Counter[str] = Counter()
+    firstname_owners: Counter[str] = Counter()
     celeb_surname: dict[str, str] = {}
+    celeb_firstname: dict[str, str] = {}
     for a in assets:
         if a.celebrity_name not in vault_variants:
             vlist = _celebrity_variants(a.celebrity_name)
@@ -637,27 +639,70 @@ def match_celebrity_asset(
             cn = _norm_entity(a.celebrity_name)
             if vlist and cn not in GENERIC_SUBFOLDERS and cn not in _GENERIC_BROLL_FOLDERS:
                 tokens = cn.split()
+                if len(tokens) >= 2 and len(tokens[0]) >= 4 and tokens[0] not in _NON_PERSON_WORDS:
+                    celeb_firstname[a.celebrity_name] = tokens[0]
+                    firstname_owners[tokens[0]] += 1
                 if len(tokens) >= 2 and len(tokens[-1]) >= 4 and tokens[-1] not in _NON_PERSON_WORDS:
                     celeb_surname[a.celebrity_name] = tokens[-1]
                     surname_owners[tokens[-1]] += 1
     unique_surnames = {
         celeb: sname for celeb, sname in celeb_surname.items() if surname_owners[sname] == 1
     }
+    unique_firstnames = {
+        celeb: fname for celeb, fname in celeb_firstname.items() if firstname_owners[fname] == 1
+    }
 
-    def _matches_visual_person(vp: str) -> bool:
-        for celeb_name, vlist in vault_variants.items():
-            if any(_has_phrase(vp, v) or _has_phrase(v, vp) or _names_close(vp, v) for v in vlist):
-                return True
-            sname = unique_surnames.get(celeb_name)
-            if sname and len(vp.split()) == 1 and vp == sname:
-                return True
-        return False
+    existing_vault_celebs = [
+        a.get('celebrity_name')
+        for a in existing
+        if a and a.get('celebrity_name') and a.get('celebrity_name') in vault_variants
+    ]
 
-    any_visual_person_in_vault = any(_matches_visual_person(vp) for vp in visual_people)
-    # If the scene visually depicts a specific named celebrity who does not exist in the local folder,
-    # return None so the Real Web Photo Fallback fetches genuine photos of THAT celebrity.
-    if visual_people and not any_visual_person_in_vault:
-        return None
+    def _scene_person_score(celeb_name: str, celeb_norm: str, variants: list[str], is_broll: bool) -> float:
+        if is_broll:
+            return 0.0
+        celeb_words = [w for w in celeb_norm.split() if len(w) >= 3]
+        sname = unique_surnames.get(celeb_name)
+        fname = unique_firstnames.get(celeb_name)
+        if any(_has_phrase(narration_norm, v) for v in variants):
+            return 290.0
+        if any(_has_phrase(visual_norm, v) for v in variants):
+            return 260.0
+        if any(_names_close(vp, v) for vp in visual_people for v in variants):
+            return 235.0
+        if sname and _has_phrase(narration_norm, sname):
+            return 215.0
+        if fname and _has_phrase(narration_norm, fname):
+            return 205.0
+        if sname and _has_phrase(visual_norm, sname):
+            return 195.0
+        if fname and _has_phrase(visual_norm, fname):
+            return 185.0
+        if len(celeb_words) >= 2 and sum(1 for w in celeb_words if w in scene_tokens) >= 2:
+            return 155.0
+        return 0.0
+
+    def _script_person_score(celeb_name: str, celeb_norm: str, variants: list[str], is_broll: bool) -> float:
+        if is_broll:
+            return 0.0
+        sname = unique_surnames.get(celeb_name)
+        fname = unique_firstnames.get(celeb_name)
+        in_script = (
+            any(_has_phrase(title_norm, v) for v in variants)
+            or (sname and _has_phrase(title_norm, sname))
+            or (fname and _has_phrase(title_norm, fname))
+            or any(_names_close(_norm_entity(p), v) for p in (people or []) for v in variants)
+            or celeb_name in existing_vault_celebs
+        )
+        if not in_script:
+            return 0.0
+        return 145.0 if celeb_name in existing_vault_celebs else 125.0
+
+    # Check if any vault celebrity matches this scene directly (Pass 1)
+    any_direct_scene_match = any(
+        _scene_person_score(cn_raw, _norm_entity(cn_raw), vlist, _norm_entity(cn_raw) in _GENERIC_BROLL_FOLDERS) > 0
+        for cn_raw, vlist in vault_variants.items()
+    )
 
     scored: list[tuple[float, str, CelebrityAsset]] = []
     for asset in assets:
@@ -668,54 +713,42 @@ def match_celebrity_asset(
         if not variants or celeb_norm in GENERIC_SUBFOLDERS:
             continue
         is_broll = celeb_norm in _GENERIC_BROLL_FOLDERS
-        if is_broll and visual_people:
-            # Never hijack a named-person scene with generic "Basketball Highlights"
+        if is_broll and (any_direct_scene_match or visual_people or existing_vault_celebs):
             continue
 
-        score = 0.0
         celeb_words = [w for w in celeb_norm.split() if len(w) >= 3]
-        sname = unique_surnames.get(asset.celebrity_name)
-        if any(_has_phrase(visual_norm, v) for v in variants):
-            score += 260.0
-        elif not is_broll and any(_names_close(vp, v) for vp in visual_people for v in variants):
-            score += 230.0
-        elif sname and _has_phrase(visual_norm, sname) and (
-            not visual_people or any(vp == sname or _has_phrase(vp, v) or _names_close(vp, v) for vp in visual_people for v in variants)
-        ):
-            score += 195.0
-        elif any(_has_phrase(narration_norm, v) for v in variants):
-            score += 165.0
-        elif sname and _has_phrase(narration_norm, sname):
-            score += 140.0
-        elif not is_broll and len(celeb_words) >= 2 and sum(1 for w in celeb_words if w in scene_tokens) >= 2:
-            score += 125.0
-        elif is_broll and any(w in domain_tokens for w in celeb_words):
-            score += 40.0
-        elif not is_broll and not visual_people and (
-            any(_has_phrase(title_norm, v) for v in variants)
-            or (sname and _has_phrase(title_norm, sname))
-        ):
-            # Spread scenes across all story/title vault celebrities when a scene lacks a specific target.
-            score += 65.0
+        if any_direct_scene_match:
+            score = _scene_person_score(asset.celebrity_name, celeb_norm, variants, is_broll)
+        else:
+            # Pass 2 Fallback: If the scene's specific clip/person isn't found in the vault,
+            # pick another clip of the person from the script/story!
+            score = _script_person_score(asset.celebrity_name, celeb_norm, variants, is_broll)
+            if score <= 0 and is_broll and not visual_people and any(w in domain_tokens for w in celeb_words):
+                score = 40.0
 
         if score <= 0:
             continue
 
         moods = json.loads(asset.mood_tags or '[]')
         mood_hits = sum(1 for m in moods if m in scene_tokens)
-        score += mood_hits * 20.0
+        score += mood_hits * 22.0
 
         if not is_broll:
             prior_uses = used_celebrities.get(asset.celebrity_name, 0)
             if prior_uses == 0:
-                score += 75.0
+                score += 45.0
             else:
-                score -= 35.0 * prior_uses
+                score -= min(40.0, 12.0 * prior_uses)
 
         if prefer_type and asset.media_type == prefer_type:
-            score += 15.0
-        if asset.id in used_ids or asset.content_hash in used_hashes:
-            score -= 500.0
+            score += 20.0
+        elif pref != 'prefer_images' and asset.media_type == 'video':
+            score += 12.0
+
+        if asset.id not in used_ids and asset.content_hash not in used_hashes:
+            score += 110.0
+        else:
+            score -= 35.0
 
         # Deterministic rotation tie-breaker so multiple scenes featuring the same celebrity pick fresh clips
         tie = hashlib.md5(f'{scene_num}:{asset.id}'.encode()).hexdigest()

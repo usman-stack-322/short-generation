@@ -190,8 +190,8 @@ def test_vault_matcher_headings_aliases_accents_diversity_and_timer_words(tmp_pa
         )
         assert s4 is not None and s4['celebrity_name'] == 'Austin Reaves'
 
-        # 5. Explicitly missing external person MUST still return None for web fallback
-        s_missing = match_celebrity_asset(
+        # 5a. When a scene's specific person/clip is not in the vault, fall back to the script's vault person ("Iman Shumpert")
+        s_fallback_same_person = match_celebrity_asset(
             db, ws_id,
             {
                 'number': 5,
@@ -203,6 +203,22 @@ def test_vault_matcher_headings_aliases_accents_diversity_and_timer_words(tmp_pa
             draft_title='Garnett Take',
             people=['Kevin Garnett', 'Iman Shumpert'],
             existing=[s1],
+        )
+        assert s_fallback_same_person is not None and s_fallback_same_person['celebrity_name'] == 'Iman Shumpert'
+
+        # 5b. When neither the scene nor the script involves any person in the vault, return None for web fallback
+        s_missing = match_celebrity_asset(
+            db, ws_id,
+            {
+                'number': 6,
+                'narration': 'Kevin Garnett offered a fierce championship warning.',
+                'visual_description': 'Kevin Garnett speaking intently on camera.',
+                'image_query': 'Kevin Garnett editorial photo',
+            },
+            draft_dir,
+            draft_title='Garnett Take',
+            people=['Kevin Garnett'],
+            existing=[],
         )
         assert s_missing is None
 

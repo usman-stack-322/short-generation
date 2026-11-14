@@ -10,6 +10,7 @@ import {
   getCachedVaultManifest,
   getLocalVaultIndex,
   getSavedDirectoryHandle,
+  matchCelebrityClipFromMap,
   saveCachedVaultManifest,
   saveDirectoryHandle,
   saveLocalVaultIndex,
@@ -128,10 +129,64 @@ export function UploadProvider({ children }) {
 
   const workspaceKey = () => localStorage.getItem("workspace_id") || JSON.parse(localStorage.getItem("user") || "{}").id || "default";
 
+  const hydratePromiseRef = useRef(null);
+
+  const ensureLocalVaultFiles = useCallback(async (interactive = false) => {
+    if (localByCelebrityRef.current && localByCelebrityRef.current.size > 0) {
+      return true;
+    }
+    if (hydratePromiseRef.current && !interactive) {
+      return hydratePromiseRef.current;
+    }
+    const run = async () => {
+      try {
+        const wsKey = workspaceKey();
+        const rec = savedFolder || (await getSavedDirectoryHandle(wsKey));
+        const dirHandle = rec?.handle;
+        if (!dirHandle) return false;
+        let granted = false;
+        if (typeof dirHandle.queryPermission === "function") {
+          const perm = await dirHandle.queryPermission({ mode: "read" });
+          if (perm === "granted") {
+            granted = true;
+          } else if (interactive && typeof dirHandle.requestPermission === "function") {
+            granted = (await dirHandle.requestPermission({ mode: "read" })) === "granted";
+          }
+        } else {
+          granted = typeof dirHandle.entries === "function";
+        }
+        if (!granted) return false;
+        const valid = await walkDirectoryHandleParallel(dirHandle);
+        if (!valid.length) return false;
+        const { index, filesByRelKey, filesByCelebrity } = buildInstantVaultIndex(valid, "", "mix_both");
+        localFilesMapRef.current = filesByRelKey;
+        localByCelebrityRef.current = filesByCelebrity;
+        setLocalVaultIndex(index);
+        saveLocalVaultIndex(wsKey, index);
+        setVaultVersion((v) => v + 1);
+        return filesByCelebrity.size > 0;
+      } catch {
+        return false;
+      } finally {
+        hydratePromiseRef.current = null;
+      }
+    };
+    const p = run();
+    if (!interactive) hydratePromiseRef.current = p;
+    return p;
+  }, [savedFolder]);
+
   useEffect(() => {
     if (!localStorage.getItem("token")) return;
     const wsKey = workspaceKey();
-    getSavedDirectoryHandle(wsKey).then(setSavedFolder).catch(() => {});
+    getSavedDirectoryHandle(wsKey)
+      .then((rec) => {
+        setSavedFolder(rec);
+        if (rec?.handle && (!localByCelebrityRef.current || localByCelebrityRef.current.size === 0)) {
+          ensureLocalVaultFiles(false).catch(() => {});
+        }
+      })
+      .catch(() => {});
     getLocalVaultIndex(wsKey)
       .then((idx) => {
         if (idx) setLocalVaultIndex((cur) => cur || idx);
@@ -169,65 +224,14 @@ export function UploadProvider({ children }) {
     return localFilesMapRef.current.get(relKey) || null;
   }, []);
 
-  const matchLocalFileForScene = useCallback((scene, people = [], preference = "mix_both", usedRelKeys = new Set()) => {
-    const byCeleb = localByCelebrityRef.current;
-    if (!byCeleb || byCeleb.size === 0) return null;
-    const haystack = [
-      scene?.image_query || "",
-      scene?.visual_description || "",
-      scene?.on_screen_text || "",
-      scene?.narration || "",
-      ...(people || []),
-    ]
-      .join(" ")
-      .toLowerCase();
-
-    const sceneNum = Number(scene?.number || 1);
-    const preferType =
-      preference === "prefer_clips"
-        ? "video"
-        : preference === "prefer_images"
-        ? "image"
-        : sceneNum % 2 === 1
-        ? "video"
-        : "image";
-
-    let bestItem = null;
-    let bestScore = -1;
-
-    for (const [celebLow, items] of byCeleb.entries()) {
-      const tokens = celebLow.split(/\s+/).filter((t) => t.length >= 3);
-      if (!tokens.length) continue;
-      let celebScore = 0;
-      if (haystack.includes(celebLow)) {
-        celebScore = 200;
-      } else if (tokens.length >= 2 && tokens.every((t) => haystack.includes(t))) {
-        celebScore = 150;
-      } else if (tokens.length >= 2 && haystack.includes(tokens[tokens.length - 1])) {
-        celebScore = 95;
-      }
-      if (celebScore <= 0) continue;
-
-      for (const item of items) {
-        let score = celebScore;
-        if (item.media_type === preferType) score += 20;
-        for (const m of item.mood_tags || []) {
-          if (haystack.includes(m)) score += 15;
-        }
-        // Prefer clips under 35 MB for instant scene attach
-        if (item.media_type === "video" && item.file?.size > 35 * 1024 * 1024) {
-          score -= 25;
-        }
-        if (usedRelKeys.has(item.relKey)) {
-          score -= 500;
-        }
-        if (score > bestScore) {
-          bestScore = score;
-          bestItem = item;
-        }
-      }
-    }
-    return bestScore > 0 ? bestItem : null;
+  const matchLocalFileForScene = useCallback((scene, optionsOrPeople = [], preference = "mix_both", usedRelKeys = new Set()) => {
+    return matchCelebrityClipFromMap(
+      localByCelebrityRef.current,
+      scene,
+      optionsOrPeople,
+      preference,
+      usedRelKeys
+    );
   }, []);
 
   const activeJobs = [vaultJob, libraryJob].filter(
@@ -624,6 +628,7 @@ export function UploadProvider({ children }) {
         localVaultIndex,
         getLocalPreviewUrl,
         getLocalFile,
+        ensureLocalVaultFiles,
         matchLocalFileForScene,
         startVaultUpload,
         startVaultUploadFromHandle,
