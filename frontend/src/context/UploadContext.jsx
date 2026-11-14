@@ -8,11 +8,13 @@ import {
   clearSavedDirectoryHandle,
   ensureDirectoryPermission,
   getCachedVaultManifest,
+  getLocalVaultFiles,
   getLocalVaultIndex,
   getSavedDirectoryHandle,
   matchCelebrityClipFromMap,
   saveCachedVaultManifest,
   saveDirectoryHandle,
+  saveLocalVaultFiles,
   saveLocalVaultIndex,
   walkDirectoryHandleParallel,
 } from "../utils/folderStore";
@@ -141,6 +143,14 @@ export function UploadProvider({ children }) {
     const run = async () => {
       try {
         const wsKey = workspaceKey();
+        // 1. Try restoring File objects directly from IndexedDB (saved from <input webkitdirectory> or folder handle)
+        const cachedFiles = await getLocalVaultFiles(wsKey);
+        if (cachedFiles?.filesByCelebrity?.size > 0) {
+          localFilesMapRef.current = cachedFiles.filesByRelKey;
+          localByCelebrityRef.current = cachedFiles.filesByCelebrity;
+          return true;
+        }
+        // 2. Fallback to walking saved FileSystemDirectoryHandle if available
         const rec = savedFolder || (await getSavedDirectoryHandle(wsKey));
         const dirHandle = rec?.handle;
         if (!dirHandle) return false;
@@ -163,6 +173,7 @@ export function UploadProvider({ children }) {
         localByCelebrityRef.current = filesByCelebrity;
         setLocalVaultIndex(index);
         saveLocalVaultIndex(wsKey, index);
+        saveLocalVaultFiles(wsKey, filesByCelebrity);
         setVaultVersion((v) => v + 1);
         return filesByCelebrity.size > 0;
       } catch {
@@ -179,6 +190,7 @@ export function UploadProvider({ children }) {
   useEffect(() => {
     if (!localStorage.getItem("token")) return;
     const wsKey = workspaceKey();
+    ensureLocalVaultFiles(false).catch(() => {});
     getSavedDirectoryHandle(wsKey)
       .then((rec) => {
         setSavedFolder(rec);
@@ -294,6 +306,7 @@ export function UploadProvider({ children }) {
       localByCelebrityRef.current = filesByCelebrity;
       setLocalVaultIndex(index);
       saveLocalVaultIndex(wsCacheKey, index);
+      saveLocalVaultFiles(wsCacheKey, filesByCelebrity);
 
       const totalBytes = valid.reduce((sum, x) => sum + (x.file?.size || 0), 0);
       const elapsedMs = Math.max(12, Math.round(performance.now() - t0));

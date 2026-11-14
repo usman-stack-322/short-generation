@@ -72,16 +72,25 @@ _NON_PERSON_WORDS = {
 }
 
 _NICKNAME_ALIASES = {
-    'nick young': ['swaggy p', 'swaggyp'],
-    'stephen curry': ['steph curry'],
+    'nick young': ['swaggy p', 'swaggyp', 'gils arena', 'gil arena'],
+    'stephen curry': ['steph curry', 'steph', 'chef curry'],
     'lebron james': ['king james', 'bron'],
-    'shaquille o neal': ['shaq', 'shaquille oneal'],
-    'shaquille oneal': ['shaq', 'shaquille o neal'],
+    'shaquille o neal': ['shaq', 'shaquille oneal', 'inside the nba'],
+    'shaquille oneal': ['shaq', 'shaquille o neal', 'inside the nba'],
     'iman shumpert': ['shump'],
-    'gilbert arenas': ['agent zero', 'gils arena'],
+    'gilbert arenas': ['agent zero', 'gils arena', 'gil arena', 'gil s arena', 'no chill gil'],
+    'kenyon martin': ['k mart', 'kmart', 'gils arena', 'gil arena'],
+    'rashad mccants': ['mccants', 'gils arena', 'gil arena'],
+    'brandon jennings': ['jennings', 'gils arena', 'gil arena'],
     'joe budden': ['budden'],
     'carmelo anthony': ['melo'],
-    'charles barkley': ['chuck'],
+    'charles barkley': ['chuck', 'inside the nba'],
+    'stephen a smith': ['stephen a', 'stephen smith', 'first take'],
+    'shannon sharpe': ['unc', 'club shay shay', 'nightcap', 'first take'],
+    'chad johnson': ['ochocinco', 'ocho', 'nightcap'],
+    'kevin durant': ['kd'],
+    'kobe bryant': ['kobe', 'mamba'],
+    'skip bayless': ['undisputed'],
 }
 
 MOOD_KEYWORDS = {
@@ -763,10 +772,17 @@ def match_celebrity_asset(
     return stage_vault_asset_for_draft(best, scene_num, folder)
 
 
+OUT_OF_CONTEXT_BLOCKLIST = (
+    'bullring', 'bullfight', 'plaza de toros', 'las arenas', 'botanical', 'herbarium',
+    'sculpture', 'statue', 'cathedral', 'church', 'castle', 'flora', 'fauna',
+    'insect', '19th century', '18th century', 'antique', 'archaeolog',
+)
+
+
 def _is_ai_or_non_photo(title: str, url: str) -> bool:
-    """Block AI-generated images, cartoons/vectors, AND paid/watermarked stock photos with labels."""
+    """Block AI-generated images, cartoons/vectors, paid/watermarked stock photos, and out-of-context museum/nature scans."""
     combined = f'{title} {url}'.lower()
-    return any(term in combined for term in AI_BLOCKLIST + WATERMARK_STOCK_BLOCKLIST)
+    return any(term in combined for term in AI_BLOCKLIST + WATERMARK_STOCK_BLOCKLIST + OUT_OF_CONTEXT_BLOCKLIST)
 
 
 def item_matches_celebrities(text: str, celebrities: list[str] | None) -> bool:
@@ -787,11 +803,34 @@ def item_matches_celebrities(text: str, celebrities: list[str] | None) -> bool:
     return False
 
 
+def _infer_sports_context_hint(text: str) -> str:
+    norm = _norm_entity(text or '')
+    tokens = set(norm.split())
+    nba_terms = {
+        'nba', 'basketball', 'gils', 'arenas', 'shumpert', 'lebron', 'curry', 'steph',
+        'lakers', 'warriors', 'celtics', 'bulls', 'cavs', 'cavaliers', 'knicks', 'heat',
+        'barkley', 'shaq', 'durant', 'kobe', 'jordan', 'kyrie', 'jokic', 'doncic', 'luka',
+        'draymond', 'garnett', 'iverson', 'melo', 'carmelo', 'shannon', 'sharpe', 'hoops',
+    }
+    nfl_terms = {'nfl', 'football', 'quarterback', 'touchdown', 'superbowl', 'ochocinco', 'mcafee'}
+    combat_terms = {'ufc', 'mma', 'boxing', 'heavyweight', 'knockout'}
+    if tokens & nba_terms or 'gil s arena' in norm or 'gils arena' in norm or 'first take' in norm:
+        return 'NBA basketball sports'
+    if tokens & nfl_terms:
+        return 'NFL football sports'
+    if tokens & combat_terms:
+        return 'UFC boxing sports'
+    if 'sports' in tokens or 'espn' in tokens or 'athlete' in tokens:
+        return 'USA sports'
+    return ''
+
+
 def search_web_real_photo(
     scene: dict,
     folder: Path,
     used: set[str] | None = None,
     target_celebrities: list[str] | None = None,
+    topic_context: str = '',
 ) -> dict | None:
     """Real web photo fallback via DuckDuckGo Image Search (celebrity-locked & filters watermarked stock/AI art)."""
     used = used or set()
@@ -801,11 +840,17 @@ def search_web_real_photo(
         return None
     scene_num = int(scene.get('number') or 1)
     neg = '-getty -alamy -shutterstock -istock -dreamstime -depositphotos -123rf -watermark'
+    sport_hint = _infer_sports_context_hint(f"{topic_context} {query} {' '.join(targets)} {scene.get('narration', '')}")
     if targets:
-        # Query per celebrity discussed so we only surface real clean photographs of them.
-        queries = [(celeb, f'{celeb} press conference photo {neg}') for celeb in targets]
+        # Query per celebrity discussed with sports context so we only surface real clean sports/podcast photographs of them.
+        queries = [
+            (celeb, f'{celeb} {sport_hint} photo {neg}'.strip() if sport_hint else f'{celeb} press conference photo {neg}')
+            for celeb in targets
+        ]
     else:
-        compact_q = re.sub(r'\s+', ' ', query)[:120]
+        compact_q = re.sub(r'\s+', ' ', query)[:100]
+        if sport_hint and sport_hint.lower().split()[0] not in compact_q.lower():
+            compact_q = f'{compact_q} {sport_hint}'
         queries = [(None, f'{compact_q} real photo {neg}')]
 
     for active_celeb, clean_q in queries:

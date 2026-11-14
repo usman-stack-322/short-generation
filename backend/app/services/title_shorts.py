@@ -591,13 +591,22 @@ def collect_one(draft,scene,existing):
     cached=cached_subject_photo(draft,scene,existing)
     if cached:return cached
 
-    # Priority 3: Real Web Photos Fallback (Celebrity-locked Openverse -> DuckDuckGo -> Wikimedia Commons -> YouTube frame)
+    # Priority 3: Real Web Photos Fallback (Celebrity-locked DuckDuckGo Sports/Editorial -> Openverse -> Wikimedia Commons -> YouTube frame)
     primary_targets, secondary_targets = _scene_target_celebrities(scene, data)
     target_batches = [primary_targets, secondary_targets] if (primary_targets or secondary_targets) else [[]]
+    topic_context = f"{draft.title} {(data.get('analysis') or {}).get('topic', '')} {(data.get('analysis') or {}).get('angle', '')}".strip()
 
     for targets in target_batches:
         if target_batches[0] and not targets:
             continue
+        try:
+            from app.services.celebrity_vault import search_web_real_photo
+            ddg_asset = search_web_real_photo(scene, folder, used, target_celebrities=targets, topic_context=topic_context)
+            if ddg_asset and ddg_asset['hash'] not in used:
+                return ddg_asset
+        except Exception as exc:
+            failures.append(type(exc).__name__)
+
         try:
             ov_asset = fetch_openverse_visual(scene, folder, used, target_celebrities=targets)
             if ov_asset and ov_asset['hash'] not in used:
@@ -605,15 +614,7 @@ def collect_one(draft,scene,existing):
         except Exception as exc:
             failures.append(type(exc).__name__)
 
-        try:
-            from app.services.celebrity_vault import search_web_real_photo
-            ddg_asset = search_web_real_photo(scene, folder, used, target_celebrities=targets)
-            if ddg_asset and ddg_asset['hash'] not in used:
-                return ddg_asset
-        except Exception as exc:
-            failures.append(type(exc).__name__)
-
-        from app.services.celebrity_vault import _is_ai_or_non_photo, item_matches_celebrities
+        from app.services.celebrity_vault import _is_ai_or_non_photo, item_matches_celebrities, _NON_PERSON_WORDS
         commons = CommonsAssetProvider()
         commons_queries = [(celeb, f'{celeb} photograph') for celeb in targets] if targets else [(None, scene['image_query'])]
         for active_celeb, cq in commons_queries:
@@ -632,8 +633,12 @@ def collect_one(draft,scene,existing):
                     if not item_matches_celebrities(metadata, [active_celeb]):
                         continue
                 else:
-                    tokens = {t for t in re.findall(r'[a-z]{3,}', scene['image_query'].lower()) if t not in {'photo', 'photograph', 'image', 'archive', 'archival', 'historical', 'modern'}}
-                    if tokens and not any(t in metadata.lower() for t in tokens):
+                    specific_tokens = {
+                        t for t in re.findall(r'[a-z]{4,}', scene['image_query'].lower())
+                        if t not in {'photo', 'photograph', 'image', 'archive', 'archival', 'historical', 'modern'}
+                        and t not in _NON_PERSON_WORDS
+                    }
+                    if not specific_tokens or sum(1 for t in specific_tokens if t in metadata.lower()) < min(2, len(specific_tokens)):
                         continue
                 try:
                     asset = download_photo(item, SimpleNamespace(scene_number=scene['number']), folder, 'context')

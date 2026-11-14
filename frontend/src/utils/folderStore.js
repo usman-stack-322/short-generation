@@ -417,11 +417,63 @@ export async function clearLocalVaultIndex(workspaceKey) {
     await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
       tx.objectStore(STORE_NAME).delete(`vault_index_${workspaceKey || "default"}`);
+      tx.objectStore(STORE_NAME).delete(`vault_files_${workspaceKey || "default"}`);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
     db.close();
   } catch {}
+}
+
+export async function saveLocalVaultFiles(workspaceKey, filesByCelebrity) {
+  if (!filesByCelebrity || filesByCelebrity.size === 0) return;
+  try {
+    const entries = [];
+    for (const [celebKey, items] of filesByCelebrity.entries()) {
+      if (!items || !items.length) continue;
+      // Keep up to 12 clips/images per celebrity in IndexedDB (File objects are stored as native disk pointers in Chrome)
+      entries.push([celebKey, items.slice(0, 12)]);
+    }
+    const db = await openHandleDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put(
+        { entries, updatedAt: Date.now() },
+        `vault_files_${workspaceKey || "default"}`
+      );
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {}
+}
+
+export async function getLocalVaultFiles(workspaceKey) {
+  try {
+    const db = await openHandleDb();
+    const record = await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const req = tx.objectStore(STORE_NAME).get(`vault_files_${workspaceKey || "default"}`);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    if (!record?.entries?.length) return null;
+    const filesByCelebrity = new Map();
+    const filesByRelKey = new Map();
+    for (const [celebKey, items] of record.entries) {
+      if (!Array.isArray(items) || !items.length) continue;
+      const validItems = items.filter((it) => it && it.file && it.relKey);
+      if (!validItems.length) continue;
+      filesByCelebrity.set(celebKey, validItems);
+      for (const it of validItems) {
+        filesByRelKey.set(it.relKey, it.file);
+      }
+    }
+    return filesByCelebrity.size > 0 ? { filesByCelebrity, filesByRelKey } : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function ensureDirectoryPermission(handle) {
@@ -511,19 +563,23 @@ const NON_PERSON_WORDS = new Set([
 ]);
 
 const NICKNAME_ALIASES = {
-  "nick young": ["swaggy p", "swaggyp"],
-  "stephen curry": ["steph curry", "steph"],
+  "nick young": ["swaggy p", "swaggyp", "gils arena", "gil arena"],
+  "stephen curry": ["steph curry", "steph", "chef curry"],
   "lebron james": ["king james", "bron", "lebron"],
-  "shaquille o neal": ["shaq", "shaquille oneal"],
-  "shaquille oneal": ["shaq", "shaquille o neal"],
+  "shaquille o neal": ["shaq", "shaquille oneal", "inside the nba"],
+  "shaquille oneal": ["shaq", "shaquille o neal", "inside the nba"],
   "iman shumpert": ["shump", "shumpert"],
-  "gilbert arenas": ["agent zero", "gils arena", "gil arenas"],
+  "gilbert arenas": ["agent zero", "gils arena", "gil arena", "gil s arena", "gil arenas", "no chill gil"],
+  "kenyon martin": ["k mart", "kmart", "gils arena", "gil arena"],
+  "rashad mccants": ["mccants", "gils arena", "gil arena"],
+  "brandon jennings": ["jennings", "gils arena", "gil arena"],
   "joe budden": ["budden"],
   "carmelo anthony": ["melo"],
-  "charles barkley": ["chuck", "barkley"],
-  "stephen a smith": ["stephen a", "stephen smith"],
-  "shannon sharpe": ["unc", "shannon"],
-  "kevin durant": ["kd"],
+  "charles barkley": ["chuck", "barkley", "inside the nba"],
+  "stephen a smith": ["stephen a", "stephen smith", "first take"],
+  "shannon sharpe": ["unc", "shannon", "club shay shay", "nightcap", "first take"],
+  "chad johnson": ["ochocinco", "ocho", "nightcap"],
+  "kevin durant": ["kd", "durant"],
   "allen iverson": ["iverson"],
   "michael jordan": ["jordan"],
   "kobe bryant": ["kobe", "mamba"],
@@ -532,6 +588,8 @@ const NICKNAME_ALIASES = {
   "giannis antetokounmpo": ["giannis"],
   "nikola jokic": ["jokic"],
   "luka doncic": ["luka"],
+  "pat mcafee": ["mcafee"],
+  "skip bayless": ["skip", "undisputed"],
 };
 
 export function normVaultEntity(text) {
@@ -716,6 +774,18 @@ export function matchCelebrityClipFromMap(byCeleb, scene, optionsOrPeople = [], 
         const sameAsLastBonus = lastNorm && meta.normName === lastNorm ? 25 : 0;
         matchedCelebs.push({ meta, celebScore: 150 + sameAsLastBonus });
       }
+    }
+  }
+
+  // Pass 3: If the user connected a Celebrity Folder and the script/scene used a show/team/player not matched above,
+  // still pick from the user's connected Celebrity Folder instead of falling back to out-of-context web images!
+  if (matchedCelebs.length === 0 && celebMeta.length > 0) {
+    for (const meta of celebMeta) {
+      const tokenOverlap = meta.tokens.filter((t) => t.length >= 3 && scriptTokens.has(t)).length;
+      matchedCelebs.push({
+        meta,
+        celebScore: 100 + tokenOverlap * 20 + Math.min(15, meta.items.length),
+      });
     }
   }
 
