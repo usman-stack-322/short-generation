@@ -5,11 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Install FFmpeg and DejaVu/Liberation fonts for 9:16 video rendering and subtitle burning
+# Install FFmpeg and DejaVu/Liberation/Noto fonts for 9:16 video rendering and subtitle burning
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     fonts-dejavu-core \
     fonts-liberation \
+    fonts-noto-core \
     espeak-ng \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*

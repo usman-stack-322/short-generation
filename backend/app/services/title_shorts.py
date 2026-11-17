@@ -182,9 +182,10 @@ def _target_word_range(draft):
         wps = max(wps, 2.35)
     scene_count = 3 if draft.duration <= 30 else (4 if draft.duration <= 45 else 5)
     min_hard = round(draft.duration * 1.15)
-    max_hard = round(draft.duration * 2.5)
-    ideal_lo = max(min_hard + 8, round((draft.duration - 2) * (wps - 0.15)))
-    ideal_hi = min(max_hard - 2, round((draft.duration - 1.5) * wps))
+    max_mult = 2.75 if pace in {'rapid', 'fast'} else 2.5
+    max_hard = round(draft.duration * max_mult)
+    ideal_hi = min(max_hard - 10, round((draft.duration - 1.5) * min(wps, 2.32)))
+    ideal_lo = max(min_hard + 8, min(ideal_hi - 8, round((draft.duration - 2) * (wps - 0.15))))
     if ideal_lo > ideal_hi:
         ideal_lo = max(min_hard + 4, ideal_hi - 8)
     target = round((ideal_lo + ideal_hi) / 2)
@@ -342,7 +343,12 @@ def instructions(draft):
 def check_plan(draft,plan,sources,verify=True):
     full=' '.join(s['narration'] for s in plan['scenes'])
     words=len(full.split());budget=draft.duration
-    if not round(budget*1.15)<=words<=round(budget*2.5):
+    try:
+        pace=(json.loads(draft.data or '{}').get('voice_pace') or 'normal').lower()
+    except Exception:
+        pace='normal'
+    max_mult=2.75 if pace in {'rapid','fast'} else 2.5
+    if not round(budget*1.15)<=words<=round(budget*max_mult):
         raise ValueError('Script length is outside the selected short duration budget. Edit or regenerate a focused script; it will not be sped up or truncated.')
     if draft.language=='Urdu' and len(re.findall('[\u0600-\u06ff]',full))<10:
         raise ValueError('Urdu output must use Urdu script.')
@@ -811,7 +817,7 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
                     'Describe any historical incident as historical, not recent or breaking news. If scope is present, use only its verified claims as factual assertions, turn the source_stories into a gripping cohesive Short Story without quotation marks or direct spoken quotations, and avoid its omissions. '
                     'Use ALL key personalities from `people` and cast matching names from `available_local_celebrities` explicitly inside each scene\'s `image_query` and `visual_description`. '
                     'The original sensational title is not the output title. TARGET SPOKEN LENGTH: write between '+str(ideal_lo)+' and '+str(ideal_hi)+' spoken words (ideal ~'+str(target_words)+' words across '+str(scene_count)+' scenes, ~'+str(per_scene_w)+' words per scene to match the '+str(draft.duration)+'s timer). Allowed hard limit: '+str(min_hard)+' to '+str(max_hard)+' words. '+json.dumps(context))
-                for attempt in range(2):
+                for attempt in range(3):
                     try:
                         plan=ai(prompt,Plan)
                     except QuotaExhaustedError:
@@ -832,8 +838,9 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
                         break
                     except ValueError as exc:
                         data.setdefault('rejected_plans',[]).append({'revision':draft.revision,'reason':str(exc),'plan':plan})
-                        if attempt:raise
-                        prompt+=' REPAIR: '+str(exc)+'. Return a complete concise plan within the hard word limit, with paraphrased narration and no quotation marks. Previous candidate: '+json.dumps(plan)
+                        if attempt >= 2:raise
+                        cand_words=len(' '.join(s['narration'] for s in plan.get('scenes',[])).split())
+                        prompt+=' REPAIR: '+str(exc)+' Your previous draft had '+str(cand_words)+' spoken words across '+str(len(plan.get('scenes',[])))+' scenes (allowed hard limit: '+str(min_hard)+'-'+str(max_hard)+'). Strictly rewrite so total spoken words across all scenes is between '+str(ideal_lo)+' and '+str(ideal_hi)+' (~'+str(per_scene_w)+' words per scene), paraphrased with no quotation marks. Previous candidate: '+json.dumps(plan)
                 default_transitions=['smoothleft','flash','wipe','zoomin','slide']
                 raw_trans=[sc.get('transition','dissolve') for sc in plan['scenes'][1:]]
                 if raw_trans and (all(t in {'cut','dissolve'} for t in raw_trans) or len(set(raw_trans))==1):
@@ -955,7 +962,7 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
             data['voice']={**metadata,'provider':provider,'caption_timing':'native synthesis boundaries','roman_urdu_note':'Roman Urdu text is passed to the compatible Urdu narrator; pronunciation needs review.' if draft.language=='Roman Urdu' else ''}
             data['render_stage']='Compositing 9:16 scenes, motion & captions (FFmpeg)'
             save(db,draft,data,'rendering')
-            plan=[{'visual_type':'licensed_clip' if (a.get('media_type')=='video' or Path(a['path']).suffix.lower() in {'.mp4','.mov','.webm'}) else 'archival_photo','text':s['narration'],'purpose':s['visual_description'],'motion':{'type':s['motion'],'amount':.06},'transition_in':s.get('transition','smoothleft')} for s,a in zip(data['plan']['scenes'],data['assets'])]
+            plan=[{'visual_type':'licensed_clip' if (a.get('media_type')=='video' or Path(a['path']).suffix.lower() in {'.mp4','.mov','.webm','.mkv','.m4v'}) else 'archival_photo','text':s['narration'],'purpose':s['visual_description'],'motion':{'type':s['motion'],'amount':.06},'transition_in':s.get('transition','smoothleft')} for s,a in zip(data['plan']['scenes'],data['assets'])]
             out=render_video(draft.id,data.get('scope',{}).get('proposed_title',draft.title),data['analysis']['topic'],full,audio,draft.duration,run_root,
                 [Path(a['path']) for a in data['assets']],scene_plan=plan,slide_kinds=['clip' if p['visual_type']=='licensed_clip' else 'photo' for p in plan],
                 subtitle_preset={'language':LANGUAGES[draft.language],'caption_style':caption_style},revision=draft.revision)
@@ -975,12 +982,18 @@ def work(draft_id,operation='prepare',scene_number=None,instruction=''):
             save(db,draft,data,'ready')
         except Exception as exc:
             from app.services.title_research import ResearchFailure
-            if operation in {'prepare','research','audit'}:
+            if operation in {'prepare','research','audit'} and draft.status in {'analyzing','researching','research_verification'}:
                 data['research_state']='failed'
                 if not isinstance(exc,ResearchFailure):data['research_failure_code']='analysis_service_failed'
             if isinstance(exc,ResearchFailure):
                 data['research_failure_code']=exc.code
                 if exc.sources:data['research_candidates']=exc.sources
-            log.warning('Title short %s failed at %s: %s',draft.id,draft.status,type(exc).__name__)
-            draft.error_message=str(exc)[:1500] if isinstance(exc,(ValueError,NarrationUnavailable)) else 'Generation failed at '+draft.status+' ('+type(exc).__name__+'). Check the server configuration and retry; no successful generation was recorded.'
+            log.warning('Title short %s failed at %s: %s (%s)',draft.id,draft.status,type(exc).__name__,str(exc)[:300])
+            if isinstance(exc,(ValueError,NarrationUnavailable)):
+                draft.error_message=str(exc)[:1500]
+            elif isinstance(exc,RuntimeError):
+                clean_detail=re.sub(r'(?:[A-Za-z]:)?(?:[/\\][^\s/\\]+){2,}','[server-path]',str(exc)).strip()
+                draft.error_message=(f'Generation failed at {draft.status}: {clean_detail}' if clean_detail else f'Generation failed at {draft.status} (RuntimeError).')[:1500]
+            else:
+                draft.error_message='Generation failed at '+draft.status+' ('+type(exc).__name__+'). Check the server configuration and retry; no successful generation was recorded.'
             data['failed_step']=draft.status;save(db,draft,data,'failed')

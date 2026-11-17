@@ -108,7 +108,16 @@ def discover(analysis,lead,diag):
 
 def youtube_id(url):
     p=urlparse(url);host=(p.hostname or '').removeprefix('www.')
-    id=(p.path.strip('/') if host=='youtu.be' else (p.path.split('/')[2] if p.path.startswith(('/embed/','/shorts/')) else parse_qs(p.query).get('v',[''])[0]) if host in {'youtube.com','youtube-nocookie.com'} else '')
+    parts=[seg for seg in p.path.split('/') if seg]
+    if host=='youtu.be':
+        id=parts[0] if parts else ''
+    elif host in {'youtube.com','m.youtube.com','music.youtube.com','studio.youtube.com','youtube-nocookie.com'}:
+        if len(parts)>=2 and parts[0] in {'embed','shorts','live','video','v'}:
+            id=parts[1]
+        else:
+            id=parse_qs(p.query).get('v',[''])[0]
+    else:
+        id=''
     return id if re.fullmatch(r'[\w-]{11}',id) else None
 
 def media_metadata(url):

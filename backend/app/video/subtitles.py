@@ -1,12 +1,13 @@
 """Estimated phrase timing; replace with forced alignment in Day 2."""
 import re
+import unicodedata
 from app.core.languages import language_info, text_units
-from app.video.fonts import resolve_font
+from app.video.fonts import font_coverage, resolve_font
 
 
 CAPTION_STYLES = {
     'viral_gold': {
-        'preferred_fonts': ('ariblk.ttf', 'seguibl.ttf', 'impact.ttf', 'segoeuib.ttf'),
+        'preferred_fonts': ('ariblk.ttf', 'seguibl.ttf', 'impact.ttf', 'segoeuib.ttf', 'LiberationSans-Bold.ttf', 'DejaVuSans-Bold.ttf'),
         'font_size': 82,
         'max_words': 3,
         'outline': 6,
@@ -21,7 +22,7 @@ CAPTION_STYLES = {
         'subtitle_mode': 'word-highlight',
     },
     'cyan_pop': {
-        'preferred_fonts': ('ariblk.ttf', 'seguibl.ttf', 'impact.ttf', 'segoeuib.ttf'),
+        'preferred_fonts': ('ariblk.ttf', 'seguibl.ttf', 'impact.ttf', 'segoeuib.ttf', 'LiberationSans-Bold.ttf', 'DejaVuSans-Bold.ttf'),
         'font_size': 82,
         'max_words': 3,
         'outline': 6,
@@ -36,7 +37,7 @@ CAPTION_STYLES = {
         'subtitle_mode': 'word-highlight',
     },
     'clean_broadcast': {
-        'preferred_fonts': ('segoeuib.ttf', 'ariblk.ttf', 'calibrib.ttf'),
+        'preferred_fonts': ('segoeuib.ttf', 'ariblk.ttf', 'calibrib.ttf', 'LiberationSans-Bold.ttf', 'DejaVuSans-Bold.ttf'),
         'font_size': 70,
         'max_words': 4,
         'outline': 5,
@@ -148,6 +149,7 @@ def write_subtitles(script, duration, ass_path, srt_path, preset=None):
     language = language_info(merged.get('language', 'en-US'))
     pref_fonts = merged.get('preferred_fonts', ()) if not language.rtl else ()
     face = resolve_font(language.code, script, preferred_fonts=pref_fonts)
+    coverage = font_coverage(face)
     timing = merged.get('narration_timing')
     max_words = merged.get('max_words', 6)
     if timing:
@@ -187,7 +189,15 @@ def write_subtitles(script, duration, ass_path, srt_path, preset=None):
     use_timed_highlight = bool(sub_mode == 'word-highlight' and (not timing or style_cfg))
 
     for i, (start, end, text) in enumerate(cues):
-        safe = re.sub(r'[{}\\]', '', text).replace('\n', ' ')
+        raw_safe = re.sub(r'[{}\\]', '', text).replace('\n', ' ')
+        if coverage:
+            safe = ''.join(
+                ch for ch in raw_safe
+                if ch.isspace() or (unicodedata.category(ch) != 'Cf' and ord(ch) in coverage)
+            )
+            safe = re.sub(r' {2,}', ' ', safe).strip() or raw_safe
+        else:
+            safe = raw_safe
         if merged.get('documentary') and not language.rtl and len(safe) > 29:
             words_doc = safe.split()
             if len(words_doc) > 1:
