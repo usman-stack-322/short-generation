@@ -134,7 +134,7 @@ def _prepare_constrained_clip(src: Path, dest: Path, segment: float, clip_dur: f
     """Normalize a single video clip sequentially to 1080x1920 30fps so Render 512MB RAM never decodes all clips at once."""
     loop_args = ['-stream_loop', '-1'] if (clip_dur <= 0 or clip_dur <= segment + 0.5) else []
     fg = (
-        f'[0:v]fps=30,setsar=1,format=yuv420p,split=2[bg][fg];'
+        f'[0:v]setpts=PTS-STARTPTS,fps=30,setsar=1,format=yuv420p,split=2[bg][fg];'
         f'[bg]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,'
         f'crop=270:480,boxblur=8:2,eq=brightness=-0.16:saturation=0.65,scale=1080:1920:flags=bilinear[b];'
         f'[fg]scale=1040:1480:force_original_aspect_ratio=decrease:flags=bicubic[f];'
@@ -146,7 +146,8 @@ def _prepare_constrained_clip(src: Path, dest: Path, segment: float, clip_dur: f
         '-filter_complex_threads', '1',
         '-protocol_whitelist', 'file,pipe',
         '-threads', '1',
-        *loop_args, '-an', '-sn', '-t', f'{segment:.6f}', '-i', str(src),
+        *loop_args, '-an', '-sn', '-i', str(src),
+        '-t', f'{segment:.6f}',
         '-filter_complex', fg, '-map', '[outv]',
         '-c:v', 'libx264', '-threads', '2', '-preset', 'ultrafast', '-crf', '18', '-r', '30',
         str(dest),
@@ -240,11 +241,13 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
         else:
             source=job_dir/f'composition-{i+1}.png'
             info=compose_photo(slide,source,focal,protect_top=not manual_timing,
-                native_limit=bool(scene_plan),max_zoom=1+float(scene_plan[i]['motion'].get('amount',.06)) if scene_plan else 1.13)
+                native_limit=bool(scene_plan),max_zoom=1+float(scene_plan[i]['motion'].get('amount',.06)) if scene_plan else 1.13,
+                canvas_size=(1080,1920) if constrained else (2160,3840))
         info.update(scene=i+1,visual_duration=segment)
         if scene_plan:info['scene_plan']=scene_plan[i]
         manifest.append(info)
-        command+=['-protocol_whitelist','file,pipe']+loop_args+(['-an','-sn'] if is_video else ['-framerate','30'])+['-t',f'{segment:.6f}','-i',str(source)]
+        in_limit = [] if is_video else ['-t', f'{segment:.6f}']
+        command+=['-protocol_whitelist','file,pipe']+loop_args+(['-an','-sn'] if is_video else ['-framerate','30'])+in_limit+['-i',str(source)]
     audio_index=len(slides);command+=['-i',str(audio_path)]
     if music_path:command+=['-stream_loop','-1','-i',str(music_path)]
     graph=[]
@@ -255,7 +258,7 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
             graph.append(f'[{i}:v]trim=duration={segment:.6f},setpts=PTS-STARTPTS,settb=1/30,fps=30,setsar=1,format=yuv420p[m{i}]')
             manifest[i]['movement']='original clip speed; clip audio excluded'
         elif slides[i].suffix.lower() in VIDEO_EXTS:
-            graph.append(f'[{i}:v]fps=30,setsar=1,format=yuv420p,split=2[bg{i}][fg{i}]')
+            graph.append(f'[{i}:v]setpts=PTS-STARTPTS,fps=30,setsar=1,format=yuv420p,split=2[bg{i}][fg{i}]')
             graph.append(f'[bg{i}]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=270:480,boxblur=8:2,eq=brightness=-0.16:saturation=0.65,scale=1080:1920:flags=bilinear[b{i}]')
             graph.append(f'[fg{i}]scale=1040:1480:force_original_aspect_ratio=decrease:flags=bicubic[f{i}]')
             graph.append(f'[b{i}][f{i}]overlay=(W-w)/2:(H-h)/2,tpad=stop_mode=clone:stop_duration=1,trim=duration={segment:.6f},setpts=PTS-STARTPTS,settb=1/30,fps=30,setsar=1,format=yuv420p[m{i}]')

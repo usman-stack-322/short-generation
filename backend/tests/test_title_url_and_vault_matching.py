@@ -343,3 +343,26 @@ def test_register_creates_isolated_private_workspaces():
         assert client.get(f'/api/title-shorts/{draft_id}', headers=h2).status_code == 404
 
 
+def test_studio_and_live_youtube_urls_and_rapid_script_budget():
+    import pytest
+    assert title_research.youtube_id('https://studio.youtube.com/video/fgbvbga_zWM/edit') == 'fgbvbga_zWM'
+    assert title_research.youtube_id('https://www.youtube.com/live/fgbvbga_zWM?feature=share') == 'fgbvbga_zWM'
+    assert title_research.youtube_id('https://m.youtube.com/watch?v=fgbvbga_zWM') == 'fgbvbga_zWM'
+
+    sources = [{'id': 'S1', 'url': 'https://example.edu/espn', 'title': 'ESPN Report', 'excerpt': 'Ryan Clark and Matt Barnes discussed the ESPN firing on air with candid remarks.'}]
+    scenes = [
+        {'narration': ' '.join(['word'] * 40), 'on_screen_text': 'Ryan Clark', 'visual_description': 'Ryan Clark', 'image_query': 'Ryan Clark', 'ai_image_prompt': 'Ryan Clark', 'motion': 'push_in', 'transition': 'smoothleft'},
+        {'narration': ' '.join(['word'] * 40), 'on_screen_text': 'ESPN News', 'visual_description': 'Matt Barnes', 'image_query': 'Matt Barnes', 'ai_image_prompt': 'Matt Barnes', 'motion': 'pull_out', 'transition': 'flash'},
+        {'narration': ' '.join(['word'] * 40), 'on_screen_text': 'Matt Barnes', 'visual_description': 'Matt Barnes', 'image_query': 'Matt Barnes', 'ai_image_prompt': 'Matt Barnes', 'motion': 'pan_left', 'transition': 'zoomin'},
+    ]
+    plan = {'scenes': scenes, 'claims': [{'claim': 'Discussed ESPN firing.', 'source_id': 'S1', 'supporting_excerpt': 'Ryan Clark and Matt Barnes discussed'}]}
+    rapid_draft = SimpleNamespace(duration=45, language='English', style='storytelling', data=json.dumps({'voice_pace': 'Rapid'}))
+    normal_draft = SimpleNamespace(duration=45, language='English', style='storytelling', data=json.dumps({'voice_pace': 'Normal'}))
+
+    checked = title_shorts.check_plan(rapid_draft, json.loads(json.dumps(plan)), sources, verify=False)
+    assert len(checked['scenes']) == 3
+    with pytest.raises(ValueError, match='duration budget'):
+        title_shorts.check_plan(normal_draft, json.loads(json.dumps(plan)), sources, verify=False)
+
+
+

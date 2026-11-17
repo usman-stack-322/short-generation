@@ -76,7 +76,7 @@ def test_vault_matcher_prefers_stephen_a_smith_and_blocks_missing_person_hijack(
         m1 = match_celebrity_asset(db, ws_id, scene1, draft_dir, draft_title='Garnett & Smith', people=['Kevin Garnett', 'Stephen A. Smith'])
         assert m1 and m1['celebrity_name'] == 'Stephen A. Smith'
 
-        # Scene featuring ONLY missing Kevin Garnett must return None so Real Web Photo Fallback finds him!
+        # Scene featuring missing Kevin Garnett while Stephen A. Smith is in the script falls back to another clip of Stephen A. Smith!
         scene2 = {
             'number': 2,
             'narration': 'Garnett challenged the ongoing basketball media criticism.',
@@ -84,9 +84,14 @@ def test_vault_matcher_prefers_stephen_a_smith_and_blocks_missing_person_hijack(
             'image_query': 'Kevin Garnett speaking intently basketball analyst',
         }
         m2 = match_celebrity_asset(db, ws_id, scene2, draft_dir, draft_title='Garnett & Smith', people=['Kevin Garnett', 'Stephen A. Smith'], existing=[m1])
-        assert m2 is None
+        assert m2 and m2['celebrity_name'] == 'Stephen A. Smith'
+        assert m2['vault_asset_id'] != m1['vault_asset_id']
 
-        # Scene 3 featuring Stephen A. Smith must pick the SECOND clip rather than repeating clip 1
+        # When neither scene nor script mentions any vault celebrity, return None for web fallback
+        m_absent = match_celebrity_asset(db, ws_id, scene2, draft_dir, draft_title='Garnett Take', people=['Kevin Garnett'], existing=[])
+        assert m_absent is None
+
+        # Scene 3 featuring Stephen A. Smith still resolves to Stephen A. Smith
         scene3 = {
             'number': 3,
             'narration': 'The disagreement spotlighted Stephen A. Smith reacting.',

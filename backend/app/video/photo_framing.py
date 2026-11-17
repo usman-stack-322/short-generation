@@ -9,7 +9,7 @@ def source_photo(path):
     return original if original.is_file() else path
 
 
-def compose_photo(path, destination, focal=(.5, .45), protect_top=True, native_limit=False, max_zoom=1.13):
+def compose_photo(path, destination, focal=(.5, .45), protect_top=True, native_limit=False, max_zoom=1.13, canvas_size=(2160, 3840)):
     source = source_photo(path)
     with Image.open(source) as opened:
         image = ImageOps.exif_transpose(opened).convert('RGB')
@@ -17,7 +17,7 @@ def compose_photo(path, destination, focal=(.5, .45), protect_top=True, native_l
     if min(image.size) < 400:
         raise ValueError('Photo resolution is unsuitable; replace it with a larger genuine source')
     width, height = image.size
-    canvas_size = (2160, 3840)
+    canvas_w, canvas_h = canvas_size
     x, y = [max(0, min(1, float(v))) for v in focal]
     if .45 <= width / height <= .72 and (not native_limit or (width>=1080*max_zoom and height>=1920*max_zoom)):
         if protect_top:y=min(y,.18)
@@ -27,15 +27,19 @@ def compose_photo(path, destination, focal=(.5, .45), protect_top=True, native_l
         # Same photograph fills the entire frame; the sharp foreground retains
         # all action/heads/awards. No generic background or fabricated imagery.
         canvas = ImageOps.fit(image, canvas_size, Image.Resampling.LANCZOS)
-        canvas = canvas.filter(ImageFilter.GaussianBlur(55))
+        canvas = canvas.filter(ImageFilter.GaussianBlur(55 if canvas_w >= 2000 else 28))
         canvas = ImageEnhance.Brightness(ImageEnhance.Color(canvas).enhance(.8)).enhance(.78)
-        bounds=(min(2080,int(width*2/max_zoom)),min(2840,int(height*2/max_zoom))) if native_limit else (2080,2840)
+        fg_max_w = round(2080 * canvas_w / 2160)
+        fg_max_h = round(2840 * canvas_h / 3840)
+        scale_up = canvas_w / 1080.0
+        bounds=(min(fg_max_w,int(width*scale_up/max_zoom)),min(fg_max_h,int(height*scale_up/max_zoom))) if native_limit else (fg_max_w,fg_max_h)
         foreground = ImageOps.contain(image, bounds, Image.Resampling.LANCZOS)
-        position = ((2160-foreground.width)//2, (3840-foreground.height)//2)
+        position = ((canvas_w-foreground.width)//2, (canvas_h-foreground.height)//2)
         shadow = Image.new('RGBA', canvas_size)
-        shadow.paste((0, 0, 0, 110), (position[0]-14, position[1]-14,
-                     position[0]+foreground.width+14, position[1]+foreground.height+14))
-        canvas = Image.alpha_composite(canvas.convert('RGBA'), shadow.filter(ImageFilter.GaussianBlur(32))).convert('RGB')
+        pad = 14 if canvas_w >= 2000 else 8
+        shadow.paste((0, 0, 0, 110), (position[0]-pad, position[1]-pad,
+                     position[0]+foreground.width+pad, position[1]+foreground.height+pad))
+        canvas = Image.alpha_composite(canvas.convert('RGBA'), shadow.filter(ImageFilter.GaussianBlur(32 if canvas_w >= 2000 else 16))).convert('RGB')
         canvas.paste(foreground, position)
         treatment = 'same-photo blurred full-bleed background; complete fitted foreground'
     destination = Path(destination)

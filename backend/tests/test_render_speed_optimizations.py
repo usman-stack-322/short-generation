@@ -214,3 +214,45 @@ def test_kokoro_provider_reuses_warm_worker_and_sets_backend_cwd(tmp_path, monke
     assert len(spawn_calls) == 1
     assert spawn_calls[0][1]['cwd'] == str(Path(providers.__file__).resolve().parents[2])
 
+
+def test_constrained_render_prepares_mkv_and_handles_emojis_in_captions(tmp_path, monkeypatch):
+    from PIL import Image
+    monkeypatch.setenv('RENDER', 'true')
+    mkv_clip = tmp_path / 'clip.mkv'
+    subprocess.run(
+        [settings.ffmpeg_path, '-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=s=1280x720:r=24:d=1.4',
+         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(mkv_clip)],
+        check=True, capture_output=True, timeout=30,
+    )
+    photo = tmp_path / 'photo.jpg'
+    Image.new('RGB', (800, 600), '#1f3a60').save(photo)
+    wav = tmp_path / 'voice.wav'
+    _write_pcm(wav, seconds=4.0, rate=16000)
+
+    script = 'Ryan Clark 👀🔥 reacted fast. Matt Barnes answered on air.'
+    out_video, _, _ = render_video(
+        'render-constrained-mkv',
+        'Ryan Clark 👀🔥',
+        'NBA Media',
+        script,
+        wav,
+        10,
+        tmp_path / 'out',
+        [mkv_clip, photo],
+        scene_plan=[
+            {'visual_type': 'licensed_clip', 'text': 'Ryan Clark 👀🔥 reacted fast.', 'purpose': 'clip',
+             'motion': {'type': 'hold', 'amount': 0.0, 'reason': 'clip'}, 'transition_in': 'smoothleft'},
+            {'visual_type': 'archival_photo', 'text': 'Matt Barnes answered on air.', 'purpose': 'photo',
+             'motion': {'type': 'push_in', 'amount': 0.05}, 'transition_in': 'flash'},
+        ],
+        slide_kinds=['clip', 'photo'],
+        subtitle_preset={'language': 'en-US', 'caption_style': 'viral_gold'},
+        revision=1,
+    )
+    assert out_video.is_file()
+    assert (out_video.parent / 'prepared-clip-1.mp4').is_file()
+    cmd = json.loads((out_video.parent / 'render-command.json').read_text(encoding='utf8'))
+    assert cmd[cmd.index('-filter_complex_threads') + 1] == '1'
+    assert cmd[cmd.index('-threads') + 1] == '2'
+    assert 'Ryan' in (out_video.parent / 'captions.ass').read_text(encoding='utf8')
+
