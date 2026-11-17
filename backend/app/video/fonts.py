@@ -69,7 +69,10 @@ def resolve_font(code, text, preferred_fonts=()):
            Path('/usr/share/fonts/truetype/noto'),
            Path('/usr/share/fonts/opentype/noto')]
     candidates = tuple(dict.fromkeys([*preferred_fonts, *language.font_files])) if preferred_fonts else language.font_files
+    latin_ascii = not language.rtl and language.code.split('-')[0].lower() in ('en', 'es', 'fr', 'de', 'it', 'pt')
+    ascii_letters = {ord(char) for char in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'}
     letter_fallback = None
+    ascii_fallback = None
     for name in candidates:
         for root in roots:
             path=root/name
@@ -79,7 +82,11 @@ def resolve_font(code, text, preferred_fonts=()):
                         return face
                     if letter_fallback is None and required_letters.issubset(coverage):
                         letter_fallback = face
+                    if ascii_fallback is None and latin_ascii and ascii_letters.issubset(coverage):
+                        ascii_fallback = face
     if letter_fallback is not None:
         return letter_fallback
+    if ascii_fallback is not None:
+        return ascii_fallback
     raise RuntimeError(f'Missing {language.name}-compatible font or glyphs. Install '+
                        ', '.join(language.font_files)+f' in Windows Fonts or {BACKEND_DIR / "fonts"}.')

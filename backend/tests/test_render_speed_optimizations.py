@@ -251,6 +251,7 @@ def test_constrained_render_prepares_mkv_and_handles_emojis_in_captions(tmp_path
     )
     assert out_video.is_file()
     assert (out_video.parent / 'prepared-clip-1.mp4').is_file()
+    assert (out_video.parent / 'prepared-photo-2.mp4').is_file()
     cmd = json.loads((out_video.parent / 'render-command.json').read_text(encoding='utf8'))
     assert cmd[cmd.index('-filter_complex_threads') + 1] == '1'
     assert cmd[cmd.index('-threads') + 1] == '2'

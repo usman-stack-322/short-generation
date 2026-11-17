@@ -1,9 +1,11 @@
+import array
+import gc
 import json
 import os
 import subprocess
 import shutil
+import sys
 import wave
-import struct
 import math
 import time
 from pathlib import Path
@@ -43,9 +45,16 @@ def validate_narration(path):
         if audio.getsampwidth()!=2 or audio.getnframes()<100:
             raise ValueError('Narration must be complete non-silent 16-bit PCM audio')
         pcm=audio.readframes(audio.getnframes())
-    samples=struct.unpack('<'+'h'*(len(pcm)//2),pcm)
-    mean=sum(samples)/len(samples) if samples else 0
-    if not samples or math.sqrt(sum((x-mean)**2 for x in samples)/len(samples))<8:
+    samples=array.array('h')
+    samples.frombytes(pcm[:len(pcm)-(len(pcm)%2)])
+    del pcm
+    if sys.byteorder!='little':
+        samples.byteswap()
+    n=len(samples)
+    if not n:
+        raise ValueError('Narration is silent or inaudible; regenerate the voice before rendering')
+    mean=sum(samples)/n
+    if math.sqrt(sum((x-mean)**2 for x in samples)/n)<8:
         raise ValueError('Narration is silent or inaudible; regenerate the voice before rendering')
 
 
@@ -75,6 +84,8 @@ VIDEO_EXTS = {'.mp4', '.mov', '.webm', '.mkv', '.m4v'}
 
 def _is_constrained_env() -> bool:
     """Detect low-memory Docker containers (e.g. Render 512 MB free tier) to prevent FFmpeg OOM kills."""
+    if os.environ.get('RENDER_LOW_MEMORY', '').strip() == '1':
+        return True
     if os.environ.get('RENDER', '').strip().lower() == 'true':
         return True
     for cgroup_file in ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'):
@@ -155,6 +166,85 @@ def _prepare_constrained_clip(src: Path, dest: Path, segment: float, clip_dur: f
     run(cmd, cwd=cwd)
 
 
+def _prepare_constrained_photo(
+    src: Path,
+    dest: Path,
+    segment: float,
+    frames: int,
+    z: str,
+    x: str,
+    y: str,
+    cwd: Path | None = None,
+):
+    """Pre-render a single photo's zoompan motion sequentially so 512MB containers never stack zoompan filters."""
+    vf = (
+        f"[0:v]zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s=1080x1920:fps=30,"
+        f"trim=duration={segment:.6f},setpts=PTS-STARTPTS,settb=1/30,fps=30,setsar=1,format=yuv420p[outv]"
+    )
+    cmd = [
+        settings.ffmpeg_path, '-y', '-hide_banner', '-loglevel', 'error',
+        '-filter_complex_threads', '1',
+        '-protocol_whitelist', 'file,pipe',
+        '-threads', '1',
+        '-framerate', '30', '-t', f'{segment:.6f}', '-i', str(src),
+        '-filter_complex', vf, '-map', '[outv]',
+        '-c:v', 'libx264', '-threads', '2', '-preset', 'ultrafast', '-crf', '18', '-r', '30',
+        str(dest),
+    ]
+    run(cmd, cwd=cwd)
+
+
+def _run_low_memory_concat_fallback(
+    prepared_sources: list[Path],
+    audio_path: Path,
+    music_path: Path | None,
+    duration: float,
+    temporary: Path,
+    cwd: Path,
+):
+    """Ultra-low-memory concat demuxer fallback (1 decoder at a time) if multi-input xfade OOMs on 512MB tier."""
+    concat_file = cwd / 'concat.txt'
+    lines = []
+    for src in prepared_sources:
+        rel = src.relative_to(cwd).as_posix() if src.is_relative_to(cwd) else str(src).replace('\\', '/')
+        escaped = rel.replace("'", "'\\''")
+        lines.append(f"file '{escaped}'\n")
+    concat_file.write_text(''.join(lines), encoding='utf8')
+    graph = [
+        '[0:v]setpts=PTS-STARTPTS,settb=1/30,fps=30,setsar=1,'
+        'tpad=stop_mode=clone:stop_duration=1,'
+        'ass=captions.ass:fontsdir=fonts:shaping=complex,format=yuv420p[outv]',
+        f'[1:a]alimiter=limit=0.84:level=0:latency=1,aresample=48000,apad,atrim=duration={duration}[speech]',
+    ]
+    audio_label = 'speech'
+    if music_path:
+        graph += [
+            '[speech]asplit=2[narration][sidechain]',
+            f'[2:a]volume=0.1,atrim=duration={duration}[music]',
+            '[music][sidechain]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=250[ducked]',
+            '[narration][ducked]amix=inputs=2:duration=first:normalize=0[mix]',
+        ]
+        audio_label = 'mix'
+    cmd = [
+        settings.ffmpeg_path, '-y', '-hide_banner', '-loglevel', 'error',
+        '-filter_complex_threads', '1',
+        '-protocol_whitelist', 'file,pipe',
+        '-threads', '1',
+        '-f', 'concat', '-safe', '0', '-i', str(concat_file),
+        '-i', str(audio_path),
+        *(['-stream_loop', '-1', '-i', str(music_path)] if music_path else []),
+        '-filter_complex', ';'.join(graph),
+        '-map', '[outv]', '-map', f'[{audio_label}]',
+        '-t', str(duration),
+        '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-crf', '21', '-r', '30',
+        '-x264-params', 'rc-lookahead=0:sync-lookahead=0:ref=1:bframes=0',
+        '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709',
+        '-c:a', 'aac', '-ar', '48000', '-b:a', '128k', '-movflags', '+faststart',
+        str(temporary),
+    ]
+    run(cmd, cwd=cwd)
+
+
 def cover_image(path,job_dir):
     if path.suffix.lower() not in VIDEO_EXTS:return path
     job_dir.mkdir(parents=True,exist_ok=True)
@@ -223,6 +313,7 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
     command=[settings.ffmpeg_path,'-y','-hide_banner','-loglevel','error','-filter_complex_threads',filter_threads]
     manifest=[]
     prepared_clips: set[int] = set()
+    prepared_sources: list[Path] = []
     for i,(slide,segment) in enumerate(zip(slides,segments)):
         focal=focal_positions[i] if focal_positions and i<len(focal_positions) else (.5,.45)
         is_video = slide.suffix.lower() in VIDEO_EXTS; loop_args = []
@@ -233,21 +324,38 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
                 _prepare_constrained_clip(slide, prep_path, segment, clip_dur, cwd=job_dir)
                 source = prep_path
                 prepared_clips.add(i)
+                prepared_sources.append(prep_path)
             else:
                 if clip_dur <= 0 or clip_dur <= segment + 0.5:
                     loop_args = ['-stream_loop', '-1']
                 source = slide
             info={'treatment':'same-video blurred background with fitted foreground','source':str(slide)}
         else:
-            source=job_dir/f'composition-{i+1}.png'
-            info=compose_photo(slide,source,focal,protect_top=not manual_timing,
+            comp_path=job_dir/f'composition-{i+1}.png'
+            info=compose_photo(slide,comp_path,focal,protect_top=not manual_timing,
                 native_limit=bool(scene_plan),max_zoom=1+float(scene_plan[i]['motion'].get('amount',.06)) if scene_plan else 1.13,
                 canvas_size=(1080,1920) if constrained else (2160,3840))
+            if constrained:
+                photo_focal = info.get('focal', focal)
+                frames = max(1, math.ceil(segment * 30) + 1)
+                z, x, y, movement = planned_motion(frames, photo_focal, scene_plan[i]) if scene_plan else motion_expression(i, frames, photo_focal)
+                prep_path = job_dir / f'prepared-photo-{i+1}.mp4'
+                _prepare_constrained_photo(comp_path, prep_path, segment, frames, z, x, y, cwd=job_dir)
+                comp_path.unlink(missing_ok=True)
+                gc.collect()
+                source = prep_path
+                prepared_clips.add(i)
+                prepared_sources.append(prep_path)
+                info['movement'] = movement
+                info['still_decode'] = 'one source frame expanded by zoompan'
+            else:
+                source = comp_path
         info.update(scene=i+1,visual_duration=segment)
         if scene_plan:info['scene_plan']=scene_plan[i]
         manifest.append(info)
-        in_limit = [] if is_video else ['-t', f'{segment:.6f}']
-        command+=['-protocol_whitelist','file,pipe']+loop_args+(['-an','-sn'] if is_video else ['-framerate','30'])+in_limit+['-i',str(source)]
+        is_video_input = is_video or (i in prepared_clips)
+        in_limit = [] if is_video_input else ['-t', f'{segment:.6f}']
+        command+=['-protocol_whitelist','file,pipe']+loop_args+(['-an','-sn'] if is_video_input else ['-framerate','30'])+in_limit+['-i',str(source)]
     audio_index=len(slides);command+=['-i',str(audio_path)]
     if music_path:command+=['-stream_loop','-1','-i',str(music_path)]
     graph=[]
@@ -256,7 +364,7 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
         focal=manifest[i].get('focal',focal)
         if i in prepared_clips:
             graph.append(f'[{i}:v]trim=duration={segment:.6f},setpts=PTS-STARTPTS,settb=1/30,fps=30,setsar=1,format=yuv420p[m{i}]')
-            manifest[i]['movement']='original clip speed; clip audio excluded'
+            manifest[i].setdefault('movement', 'original clip speed; clip audio excluded')
         elif slides[i].suffix.lower() in VIDEO_EXTS:
             graph.append(f'[{i}:v]setpts=PTS-STARTPTS,fps=30,setsar=1,format=yuv420p,split=2[bg{i}][fg{i}]')
             graph.append(f'[bg{i}]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=270:480,boxblur=8:2,eq=brightness=-0.16:saturation=0.65,scale=1080:1920:flags=bilinear[b{i}]')
@@ -310,7 +418,16 @@ def render_video(job_id, topic, personality, script, audio_path, duration, outpu
               *x264_mem_args,
               '-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709',
               '-c:a','aac','-ar','48000','-b:a','160k','-movflags','+faststart',str(temporary)]
-    run(command,cwd=job_dir)
+    if constrained:
+        gc.collect()
+    try:
+        run(command,cwd=job_dir)
+    except RuntimeError:
+        if constrained and len(prepared_sources) == len(slides) and all(p.is_file() for p in prepared_sources):
+            temporary.unlink(missing_ok=True)
+            _run_low_memory_concat_fallback(prepared_sources, audio_path, music_path, duration, temporary, cwd=job_dir)
+        else:
+            raise
     if temporary.is_file():temporary.replace(output)
     if output.is_file():
         subprocess.run([settings.ffmpeg_path,'-y','-v','error','-ss','0.05','-i',str(output),
