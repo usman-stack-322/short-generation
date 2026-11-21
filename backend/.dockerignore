@@ -1,6 +1,0 @@
-.env*
-*.db*
-.session_secret
-backups
-__pycache__
-tests

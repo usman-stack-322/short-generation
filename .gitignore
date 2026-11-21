@@ -1,46 +1,32 @@
-backend/.env
-backend/*.db
-backend/.venv/
-backend/models/
-backend/.session_secret
-backend/backups/
-frontend/node_modules/
-frontend/dist/
+# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
 .venv/
-.env
-.session_secret
-release/
-*.zip
-*.onnx
-*.bin
-*.db
-*.sqlite
-*.sqlite3
-*.log
-generated/*
-!generated/audio/
-generated/audio/*
-!generated/audio/.gitkeep
-!generated/images/
-generated/images/*
-!generated/images/.gitkeep
-!generated/videos/
-generated/videos/*
-!generated/videos/.gitkeep
-!generated/thumbnails/
-generated/thumbnails/*
-!generated/thumbnails/.gitkeep
-!generated/subtitles/
-generated/subtitles/*
-!generated/subtitles/.gitkeep
-!generated/music/
-generated/music/*
-!generated/music/.gitkeep
+venv/
+.pytest_cache/
+.pytest_cache_v2/
 
-# SQLite runtime files
-*.db-shm
-*.db-wal
-*.db-journal
+# Local Secrets & DB
+.env
+.env.*
+!.env.example
+!frontend/.env.example
+*.db
+*.sqlite3
+sync_checkpoint.json
+
+# Media & Temp Renders
+tmp_renders/
+*.mp4
+*.mov
+*.mkv
+*.mp3
+*.wav
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Local Backups & Media Vault
+_v1_archive/
+generated/
