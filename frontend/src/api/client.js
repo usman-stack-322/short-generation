@@ -6,8 +6,60 @@ export const API_BASE = (
   .trim()
   .replace(/\/+$/, '');
 
+export const AUTH_TOKEN_KEY = 'ai_shorts_auth_token';
+
+let unauthorizedHandler = null;
+
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = typeof handler === 'function' ? handler : null;
+}
+
+export function getAuthToken() {
+  try {
+    return window.localStorage.getItem(AUTH_TOKEN_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setAuthToken(token) {
+  try {
+    if (token) {
+      window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  } catch {
+    // Ignore storage unavailability cleanly
+  }
+}
+
+export function clearAuthToken() {
+  setAuthToken('');
+}
+
 async function requestJson(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, options);
+  const { skipAuth = false, headers: customHeaders = {}, ...fetchOptions } = options;
+  const headers = new Headers(customHeaders);
+  if (!skipAuth) {
+    const token = getAuthToken();
+    if (token && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+  }
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...fetchOptions,
+    headers,
+  });
+
+  if (response.status === 401 && !skipAuth) {
+    clearAuthToken();
+    if (unauthorizedHandler) {
+      unauthorizedHandler();
+    }
+  }
+
   const text = await response.text();
   let data = null;
   if (text) {
@@ -26,8 +78,34 @@ async function requestJson(path, options = {}) {
   return data;
 }
 
+export function registerUser({ email, password, displayName }) {
+  return requestJson('/api/auth/register', {
+    method: 'POST',
+    skipAuth: true,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email,
+      password,
+      display_name: displayName || undefined,
+    }),
+  });
+}
+
+export function loginUser({ email, password }) {
+  return requestJson('/api/auth/login', {
+    method: 'POST',
+    skipAuth: true,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export function getCurrentUser() {
+  return requestJson('/api/auth/me');
+}
+
 export function getHealth() {
-  return requestJson('/api/health');
+  return requestJson('/api/health', { skipAuth: true });
 }
 
 export function listCelebrities() {
@@ -73,7 +151,9 @@ export function createProject(payload) {
 }
 
 export function getProjectVideoUrl(projectId) {
-  return `${API_BASE}/api/projects/${encodeURIComponent(projectId)}/video`;
+  const baseUrl = `${API_BASE}/api/projects/${encodeURIComponent(projectId)}/video`;
+  const token = getAuthToken();
+  return token ? `${baseUrl}?token=${encodeURIComponent(token)}` : baseUrl;
 }
 
 export function startLocalFolderScan({ folderPath, category }) {

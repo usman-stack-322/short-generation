@@ -1,18 +1,52 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { API_BASE, getHealth, listCelebrities, listProjects } from './api/client';
+import ProtectedRoute from './components/ProtectedRoute';
 import Sidebar from './components/Sidebar';
+import { useAuth } from './context/AuthContext';
 import CelebrityVaultPage from './pages/CelebrityVaultPage';
 import CreateVideoPage from './pages/CreateVideoPage';
 import DashboardPage from './pages/DashboardPage';
+import LoginPage from './pages/LoginPage';
 import RenderQueuePage from './pages/RenderQueuePage';
 
-export default function App() {
-  const [activePage, setActivePage] = useState('dashboard');
+const ROUTE_TO_PAGE = {
+  '/': 'dashboard',
+  '/vault': 'vault',
+  '/create': 'create',
+  '/queue': 'queue',
+};
+
+const PAGE_TO_ROUTE = {
+  dashboard: '/',
+  vault: '/vault',
+  create: '/create',
+  queue: '/queue',
+};
+
+function StudioShell() {
+  const { user, logout } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [health, setHealth] = useState(null);
   const [celebrities, setCelebrities] = useState([]);
   const [projects, setProjects] = useState([]);
   const [apiError, setApiError] = useState('');
+
+  const activePage = ROUTE_TO_PAGE[location.pathname] || 'dashboard';
+
+  const handleNavigate = useCallback(
+    (pageId) => {
+      navigate(PAGE_TO_ROUTE[pageId] || '/');
+    },
+    [navigate]
+  );
+
+  const handleLogout = useCallback(() => {
+    logout();
+    navigate('/login', { replace: true });
+  }, [logout, navigate]);
 
   const refreshAll = useCallback(async () => {
     try {
@@ -42,9 +76,11 @@ export default function App() {
     <div className="min-h-screen bg-[#090B10] text-[#F8FAFC] lg:flex">
       <Sidebar
         activePage={activePage}
-        onNavigate={setActivePage}
+        onNavigate={handleNavigate}
         activeJobCount={activeJobCount}
         health={health}
+        user={user}
+        onLogout={handleLogout}
         mobileOpen={mobileOpen}
         onToggleMobile={() => setMobileOpen((prev) => !prev)}
       />
@@ -57,34 +93,60 @@ export default function App() {
             </div>
           )}
 
-          {activePage === 'dashboard' && (
-            <DashboardPage
-              celebrities={celebrities}
-              projects={projects}
-              health={health}
-              onNavigate={setActivePage}
-              onRefresh={refreshAll}
+          <Routes>
+            <Route
+              path="/"
+              element={
+                <DashboardPage
+                  celebrities={celebrities}
+                  projects={projects}
+                  health={health}
+                  onNavigate={handleNavigate}
+                  onRefresh={refreshAll}
+                />
+              }
             />
-          )}
-
-          {activePage === 'vault' && (
-            <CelebrityVaultPage celebrities={celebrities} onRefresh={refreshAll} />
-          )}
-
-          {activePage === 'create' && (
-            <CreateVideoPage
-              onCreated={async () => {
-                await refreshAll();
-                setActivePage('queue');
-              }}
+            <Route
+              path="/vault"
+              element={
+                <CelebrityVaultPage celebrities={celebrities} onRefresh={refreshAll} />
+              }
             />
-          )}
-
-          {activePage === 'queue' && (
-            <RenderQueuePage projects={projects} onRefresh={refreshAll} />
-          )}
+            <Route
+              path="/create"
+              element={
+                <CreateVideoPage
+                  onCreated={async () => {
+                    await refreshAll();
+                    navigate('/queue');
+                  }}
+                />
+              }
+            />
+            <Route
+              path="/queue"
+              element={<RenderQueuePage projects={projects} onRefresh={refreshAll} />}
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
         </div>
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        path="/*"
+        element={
+          <ProtectedRoute>
+            <StudioShell />
+          </ProtectedRoute>
+        }
+      />
+    </Routes>
   );
 }

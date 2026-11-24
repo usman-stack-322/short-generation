@@ -21,7 +21,7 @@ from ..schemas import (
 )
 from ..services.clip_matcher import CelebrityProfile, detect_celebrities
 from ..services.r2_storage import R2StorageService
-from .deps import get_current_owner, verify_worker_token
+from .deps import get_current_user, get_current_user_from_header_or_query, verify_worker_token
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 LOCAL_RENDERS_ROOT = Path("generated/renders")
@@ -47,6 +47,7 @@ def _to_job_out(job: Optional[RenderJob]) -> Optional[RenderJobOut]:
 def _to_project_out(project: VideoProject, job: Optional[RenderJob]) -> ProjectOut:
     return ProjectOut(
         id=project.id,
+        owner_id=project.owner_id,
         mode=project.mode,
         input_type=project.input_type,
         title=project.title,
@@ -66,7 +67,7 @@ def _to_project_out(project: VideoProject, job: Optional[RenderJob]) -> ProjectO
 def create_project(
     payload: ProjectCreate,
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user),
 ):
     celebs = db.execute(select(Celebrity).where(Celebrity.owner_id == owner.id)).scalars().all()
     catalog = [
@@ -113,7 +114,7 @@ def create_project(
 @router.get("", response_model=list[ProjectOut])
 def list_projects(
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user),
 ):
     projects = db.execute(
         select(VideoProject)
@@ -195,7 +196,7 @@ def update_job_progress(
 def stream_project_video(
     project_id: str,
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user_from_header_or_query),
 ):
     """Stream or download the rendered MP4 (from local disk in STORAGE_MODE=local or R2 presigned URL)."""
     project = db.execute(
@@ -228,7 +229,7 @@ def stream_project_video(
 def delete_project(
     project_id: str,
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user),
 ):
     """Deletes a project (cascading its RenderJobs) and unlinks any local rendered MP4 inside generated/renders/."""
     project = db.execute(

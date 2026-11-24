@@ -28,6 +28,9 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     worker_shared_secret: str = "dev-worker-secret"
+    jwt_secret: str = "dev-jwt-secret-change-in-production-min-32bytes"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_hours: int = 168
 
     @property
     def cors_origin_list(self) -> List[str]:

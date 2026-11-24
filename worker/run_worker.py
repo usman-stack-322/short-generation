@@ -71,6 +71,7 @@ def process_project(
         worker_token=worker_token,
         storage_mode=storage_mode,
         enable_web_fallback=enable_web_fallback,
+        owner_id=project.get("owner_id"),
     )
 
     try:

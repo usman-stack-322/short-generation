@@ -33,6 +33,7 @@ class User(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    hashed_password: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     display_name: Mapped[str] = mapped_column(String(120), default="Studio Owner")
     plan_tier: Mapped[str] = mapped_column(String(32), default="personal")  # personal | pro | agency
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -38,7 +38,7 @@ from ..services.r2_sync import (
     extract_filename_tags,
     probe_video_metadata,
 )
-from .deps import get_current_owner, verify_worker_token
+from .deps import get_current_user, get_current_user_or_worker, verify_worker_token
 
 router = APIRouter(prefix="/api/clips", tags=["clips"])
 LOCAL_UPLOAD_ROOT = Path("generated/vault_uploads")
@@ -49,7 +49,7 @@ def list_clips(
     celebrity_id: Optional[str] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user_or_worker),
 ):
     stmt = (
         select(MediaClip, Celebrity.name)
@@ -87,7 +87,7 @@ def list_clips(
 def create_presigned_upload(
     payload: PresignedUploadRequest,
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user),
 ):
     celeb = db.execute(
         select(Celebrity).where(Celebrity.id == payload.celebrity_id, Celebrity.owner_id == owner.id)
@@ -111,7 +111,7 @@ def create_presigned_upload(
 def bulk_index_clips(
     payload: BulkIndexRequest,
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user_or_worker),
 ):
     """Used by scripts/bulk_sync_r2.py to register hundreds of R2 clips in one batch."""
     inserted = 0
@@ -202,7 +202,7 @@ def upload_local_clips(
     files: list[UploadFile] = File(...),
     tags: str = Form(default=""),
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user),
 ):
     """Uploads 1-5 clips directly from the browser into generated/vault_uploads/ in STORAGE_MODE=local."""
     settings = get_settings()
@@ -518,7 +518,7 @@ def _run_local_folder_scan(
 @router.post("/scan-local-folder", response_model=ScanLocalFolderStatus, status_code=202)
 def start_local_folder_scan(
     payload: ScanLocalFolderRequest,
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user),
 ):
     """Starts a fast non-blocking background scan of <folder_path>/<Celebrity Name>/**/* when STORAGE_MODE=local."""
     settings = get_settings()
@@ -572,7 +572,7 @@ def start_local_folder_scan(
 @router.get("/scan-local-folder/{scan_id}", response_model=ScanLocalFolderStatus)
 def get_local_folder_scan_status(
     scan_id: str,
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user),
 ):
     """Returns live progress counters for a running or finished local folder scan."""
     with _SCAN_LOCK:

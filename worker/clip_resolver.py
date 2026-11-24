@@ -66,6 +66,7 @@ class ClipResolver:
         enable_web_fallback: bool = True,
         web_clips_dir: Path = Path("generated/web_clips"),
         cache_dir: Path = Path("generated/worker_cache"),
+        owner_id: Optional[str] = None,
     ):
         self.api_base_url = api_base_url.rstrip("/")
         self.worker_token = worker_token
@@ -73,12 +74,24 @@ class ClipResolver:
         self.enable_web_fallback = enable_web_fallback
         self.web_clips_dir = web_clips_dir
         self.cache_dir = cache_dir
+        self.owner_id = owner_id
+
+    def _worker_headers(self) -> dict[str, str]:
+        headers = {"x-worker-token": self.worker_token}
+        if self.owner_id:
+            headers["x-owner-id"] = self.owner_id
+        return headers
 
     def _fetch_catalog_and_clips(self) -> tuple[list[CelebrityProfile], list[ClipCandidate]]:
+        headers = self._worker_headers()
         with httpx.Client(timeout=30) as client:
-            celebs_resp = client.get(f"{self.api_base_url}/api/celebrities")
+            celebs_resp = client.get(f"{self.api_base_url}/api/celebrities", headers=headers)
             celebs_resp.raise_for_status()
-            clips_resp = client.get(f"{self.api_base_url}/api/clips", params={"limit": 500})
+            clips_resp = client.get(
+                f"{self.api_base_url}/api/clips",
+                params={"limit": 500},
+                headers=headers,
+            )
             clips_resp.raise_for_status()
 
         catalog = [
@@ -169,7 +182,11 @@ class ClipResolver:
 
             if fetched_items:
                 with httpx.Client(timeout=30) as client:
-                    resp = client.post(f"{self.api_base_url}/api/clips/bulk-index", json={"clips": fetched_items})
+                    resp = client.post(
+                        f"{self.api_base_url}/api/clips/bulk-index",
+                        headers=self._worker_headers(),
+                        json={"clips": fetched_items},
+                    )
                     resp.raise_for_status()
                 catalog, raw_clips = self._fetch_catalog_and_clips()
                 usable = self._usable_clips(raw_clips)

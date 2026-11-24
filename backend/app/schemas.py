@@ -1,7 +1,52 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _normalize_email(raw: str) -> str:
+    cleaned = (raw or "").strip().lower()
+    if "@" not in cleaned or cleaned.startswith("@") or cleaned.endswith("@"):
+        raise ValueError("Enter a valid email address.")
+    local, _, domain = cleaned.partition("@")
+    if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        raise ValueError("Enter a valid email address.")
+    return cleaned
+
+
+class AuthRegisterRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+    password: str = Field(..., min_length=6, max_length=72)
+    display_name: Optional[str] = Field(default=None, max_length=120)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+
+class AuthLoginRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+    password: str = Field(..., min_length=1, max_length=72)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+
+class UserOut(BaseModel):
+    id: str
+    email: str
+    display_name: str
+    plan_tier: str
+    created_at: Optional[datetime] = None
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    user: UserOut
 
 
 class CelebrityCreate(BaseModel):
@@ -100,6 +145,7 @@ class RenderJobOut(BaseModel):
 
 class ProjectOut(BaseModel):
     id: str
+    owner_id: Optional[str] = None
     mode: str
     input_type: str
     title: str

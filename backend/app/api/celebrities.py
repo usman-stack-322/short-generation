@@ -7,7 +7,7 @@ from ..database import get_db
 from ..models import Celebrity, MediaClip, User
 from ..schemas import CelebrityCreate, CelebrityOut
 from ..services.clip_matcher import slugify
-from .deps import get_current_owner
+from .deps import get_current_user, get_current_user_or_worker
 
 router = APIRouter(prefix="/api/celebrities", tags=["celebrities"])
 
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/celebrities", tags=["celebrities"])
 @router.get("", response_model=list[CelebrityOut])
 def list_celebrities(
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user_or_worker),
 ):
     rows = db.execute(
         select(
@@ -48,7 +48,7 @@ def list_celebrities(
 def create_celebrity(
     payload: CelebrityCreate,
     db: Session = Depends(get_db),
-    owner: User = Depends(get_current_owner),
+    owner: User = Depends(get_current_user),
 ):
     slug = slugify(payload.name)
     existing = db.execute(

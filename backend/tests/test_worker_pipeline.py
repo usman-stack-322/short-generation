@@ -361,18 +361,32 @@ def test_video_endpoint_and_mark_clips_used_api():
 
         try:
             with TestClient(app) as client:
-                celeb_resp = client.post("/api/celebrities", json={"name": "Stephen Curry", "category": "NBA"})
+                reg = client.post(
+                    "/api/auth/register",
+                    json={"email": "workerqa@studio.test", "password": "Password123!"},
+                )
+                assert reg.status_code == 201
+                token = reg.json()["access_token"]
+                auth_headers = {"Authorization": f"Bearer {token}"}
+
+                celeb_resp = client.post(
+                    "/api/celebrities",
+                    headers=auth_headers,
+                    json={"name": "Stephen Curry", "category": "NBA"},
+                )
                 assert celeb_resp.status_code == 201
                 celeb_id = celeb_resp.json()["id"]
 
                 presign = client.post(
                     "/api/clips/presign-upload",
+                    headers=auth_headers,
                     json={"celebrity_id": celeb_id, "filename": "clip.mp4"},
                 )
                 assert presign.status_code == 503
 
                 bulk = client.post(
                     "/api/clips/bulk-index",
+                    headers=auth_headers,
                     json={
                         "clips": [
                             {
@@ -393,10 +407,11 @@ def test_video_endpoint_and_mark_clips_used_api():
                     },
                 )
                 assert bulk.status_code == 200
-                clip_id = client.get("/api/clips").json()[0]["id"]
+                clip_id = client.get("/api/clips", headers=auth_headers).json()[0]["id"]
 
                 proj = client.post(
                     "/api/projects",
+                    headers=auth_headers,
                     json={
                         "mode": "short",
                         "input_type": "title",
@@ -428,7 +443,7 @@ def test_video_endpoint_and_mark_clips_used_api():
                 )
                 assert ok_mark.status_code == 200
                 assert ok_mark.json()["updated"] == 1
-                assert client.get("/api/clips").json()[0]["usage_count"] == 1
+                assert client.get("/api/clips", headers=auth_headers).json()[0]["usage_count"] == 1
 
                 done = client.post(
                     f"/api/projects/worker/jobs/{job_id}/progress",
@@ -442,10 +457,12 @@ def test_video_endpoint_and_mark_clips_used_api():
                 )
                 assert done.status_code == 200
 
-                video_resp = client.get(f"/api/projects/{project_id}/video")
+                assert client.get(f"/api/projects/{project_id}/video").status_code == 401
+                video_resp = client.get(f"/api/projects/{project_id}/video?token={token}")
                 assert video_resp.status_code == 200
                 assert video_resp.headers["content-type"].startswith("video/mp4")
                 assert video_resp.content == sample_mp4.read_bytes()
+                assert client.get(f"/api/projects/{project_id}/video", headers=auth_headers).status_code == 200
         finally:
             database.engine.dispose()
 
@@ -475,13 +492,25 @@ def test_upload_local_clips_endpoint(monkeypatch):
 
         try:
             with TestClient(app) as client:
-                celeb_resp = client.post("/api/celebrities", json={"name": "LeBron James", "category": "NBA"})
+                reg = client.post(
+                    "/api/auth/register",
+                    json={"email": "uploadqa@studio.test", "password": "Password123!"},
+                )
+                assert reg.status_code == 201
+                auth_headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+
+                celeb_resp = client.post(
+                    "/api/celebrities",
+                    headers=auth_headers,
+                    json={"name": "LeBron James", "category": "NBA"},
+                )
                 assert celeb_resp.status_code == 201
                 celeb_id = celeb_resp.json()["id"]
 
                 with sample_mp4.open("rb") as fh:
                     up = client.post(
                         "/api/clips/upload-local",
+                        headers=auth_headers,
                         data={"celebrity_id": celeb_id, "tags": "lakers, postgame"},
                         files=[("files", ("postgame_tunnel.mp4", fh, "video/mp4"))],
                     )
@@ -545,14 +574,23 @@ def test_scan_local_folder_background_endpoint(monkeypatch):
 
         try:
             with TestClient(app) as client:
+                reg = client.post(
+                    "/api/auth/register",
+                    json={"email": "scanqa@studio.test", "password": "Password123!"},
+                )
+                assert reg.status_code == 201
+                auth_headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+
                 bad = client.post(
                     "/api/clips/scan-local-folder",
+                    headers=auth_headers,
                     json={"folder_path": str(tmp_dir / "does_not_exist"), "category": "NBA"},
                 )
                 assert bad.status_code == 400
 
                 started = client.post(
                     "/api/clips/scan-local-folder",
+                    headers=auth_headers,
                     json={"folder_path": f'"{vault_dir}"', "category": "NBA"},
                 )
                 assert started.status_code == 202
@@ -560,7 +598,7 @@ def test_scan_local_folder_background_endpoint(monkeypatch):
 
                 status_payload = started.json()
                 for _ in range(80):
-                    poll = client.get(f"/api/clips/scan-local-folder/{scan_id}")
+                    poll = client.get(f"/api/clips/scan-local-folder/{scan_id}", headers=auth_headers)
                     assert poll.status_code == 200
                     status_payload = poll.json()
                     if status_payload["status"] != "running":
@@ -576,7 +614,7 @@ def test_scan_local_folder_background_endpoint(monkeypatch):
                 assert status_payload["elapsed_ms"] < 2000
                 assert len(probe_calls) == 0
 
-                clips = client.get("/api/clips").json()
+                clips = client.get("/api/clips", headers=auth_headers).json()
                 assert len(clips) == 20
                 assert all(c["r2_key"].startswith("local://") for c in clips)
                 assert all(c["duration_sec"] == 0.0 and c["width"] == 0 for c in clips)
@@ -584,12 +622,13 @@ def test_scan_local_folder_background_endpoint(monkeypatch):
                 # Re-scan skips existing duplicates instantaneously without ffprobe
                 rescan = client.post(
                     "/api/clips/scan-local-folder",
+                    headers=auth_headers,
                     json={"folder_path": str(vault_dir), "category": "NBA"},
                 )
                 assert rescan.status_code == 202
                 rescan_id = rescan.json()["scan_id"]
                 for _ in range(80):
-                    poll2 = client.get(f"/api/clips/scan-local-folder/{rescan_id}")
+                    poll2 = client.get(f"/api/clips/scan-local-folder/{rescan_id}", headers=auth_headers)
                     status_payload2 = poll2.json()
                     if status_payload2["status"] != "running":
                         break
@@ -603,12 +642,13 @@ def test_scan_local_folder_background_endpoint(monkeypatch):
                 # Optional probe_metadata=True still works when explicitly requested
                 opt_scan = client.post(
                     "/api/clips/scan-local-folder",
+                    headers=auth_headers,
                     json={"folder_path": str(probe_dir), "category": "NBA", "probe_metadata": True},
                 )
                 assert opt_scan.status_code == 202
                 opt_id = opt_scan.json()["scan_id"]
                 for _ in range(80):
-                    opt_poll = client.get(f"/api/clips/scan-local-folder/{opt_id}").json()
+                    opt_poll = client.get(f"/api/clips/scan-local-folder/{opt_id}", headers=auth_headers).json()
                     if opt_poll["status"] != "running":
                         break
                     time.sleep(0.05)
@@ -616,7 +656,7 @@ def test_scan_local_folder_background_endpoint(monkeypatch):
                 assert opt_poll["status"] == "completed"
                 assert opt_poll["inserted"] == 1
                 assert len(probe_calls) == 1
-                giannis_clip = [c for c in client.get("/api/clips").json() if c["celebrity_name"] == "Giannis Antetokounmpo"][0]
+                giannis_clip = [c for c in client.get("/api/clips", headers=auth_headers).json() if c["celebrity_name"] == "Giannis Antetokounmpo"][0]
                 assert giannis_clip["width"] == 1280
                 assert giannis_clip["height"] == 720
                 assert giannis_clip["duration_sec"] > 0
@@ -705,8 +745,16 @@ def test_delete_project_removes_db_rows_and_local_rendered_mp4(monkeypatch):
 
         try:
             with TestClient(app) as client:
+                reg = client.post(
+                    "/api/auth/register",
+                    json={"email": "deleteqa@studio.test", "password": "Password123!"},
+                )
+                assert reg.status_code == 201
+                auth_headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+
                 proj = client.post(
                     "/api/projects",
+                    headers=auth_headers,
                     json={
                         "mode": "short",
                         "input_type": "title",
@@ -743,14 +791,14 @@ def test_delete_project_removes_db_rows_and_local_rendered_mp4(monkeypatch):
                 assert done.status_code == 200
                 assert rendered_mp4.is_file()
 
-                deleted = client.delete(f"/api/projects/{project_id}")
+                deleted = client.delete(f"/api/projects/{project_id}", headers=auth_headers)
                 assert deleted.status_code == 200
                 assert deleted.json() == {"deleted": True, "project_id": project_id}
                 assert not rendered_mp4.exists()
                 assert not work_dir.exists()
-                assert all(p["id"] != project_id for p in client.get("/api/projects").json())
-                assert client.get(f"/api/projects/{project_id}/video").status_code == 404
-                assert client.delete(f"/api/projects/{project_id}").status_code == 404
+                assert all(p["id"] != project_id for p in client.get("/api/projects", headers=auth_headers).json())
+                assert client.get(f"/api/projects/{project_id}/video", headers=auth_headers).status_code == 404
+                assert client.delete(f"/api/projects/{project_id}", headers=auth_headers).status_code == 404
 
                 db = database.SessionLocal()
                 try:
@@ -764,6 +812,7 @@ def test_delete_project_removes_db_rows_and_local_rendered_mp4(monkeypatch):
                 # Guard: project pointing outside generated/renders/ never deletes external files
                 ext_proj = client.post(
                     "/api/projects",
+                    headers=auth_headers,
                     json={
                         "mode": "short",
                         "input_type": "title",
@@ -786,7 +835,7 @@ def test_delete_project_removes_db_rows_and_local_rendered_mp4(monkeypatch):
                         "output_r2_key": f"local://{outside_file.resolve().as_posix()}",
                     },
                 )
-                assert client.delete(f"/api/projects/{ext_id}").status_code == 200
+                assert client.delete(f"/api/projects/{ext_id}", headers=auth_headers).status_code == 200
                 assert outside_file.is_file()
         finally:
             database.engine.dispose()

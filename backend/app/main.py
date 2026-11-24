@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import database
-from .api import celebrities, clips, projects
+from .api import auth, celebrities, clips, projects
 from .config import get_settings
 
 
@@ -37,6 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(celebrities.router)
 app.include_router(clips.router)
 app.include_router(projects.router)

@@ -1,4 +1,14 @@
-import { Clapperboard, Film, FolderOpen, LayoutDashboard, Menu, PlusCircle, Server, X } from 'lucide-react';
+import {
+  Clapperboard,
+  Film,
+  FolderOpen,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  PlusCircle,
+  Server,
+  X,
+} from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Studio Dashboard', icon: LayoutDashboard },
@@ -12,6 +22,8 @@ export default function Sidebar({
   onNavigate,
   activeJobCount,
   health,
+  user,
+  onLogout,
   mobileOpen,
   onToggleMobile,
 }) {
@@ -88,7 +100,7 @@ export default function Sidebar({
           })}
         </nav>
 
-        <div className="border-t border-[#22283A] p-4">
+        <div className="space-y-3 border-t border-[#22283A] p-4">
           <div className="rounded-lg border border-[#22283A] bg-[#131722] p-3">
             <div className="flex items-center justify-between text-xs">
               <span className="flex items-center gap-1.5 text-[#94A3B8]">
@@ -107,6 +119,29 @@ export default function Sidebar({
               Storage: <span className="text-[#F8FAFC]">{storageLabel}</span>
             </p>
           </div>
+
+          {user && (
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-[#22283A] bg-[#131722] px-3 py-2.5">
+              <div className="min-w-0">
+                <p className="truncate text-xs font-medium text-[#F8FAFC]">
+                  {user.display_name || user.email}
+                </p>
+                <p className="truncate font-mono text-[11px] text-[#94A3B8]">
+                  {user.email}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Logout"
+                aria-label="Logout"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[#22283A] bg-[#090B10] px-2.5 py-1.5 text-xs font-medium text-[#94A3B8] transition hover:border-[#F43F5E]/50 hover:bg-[#F43F5E]/10 hover:text-[#F43F5E]"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                Logout
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 
