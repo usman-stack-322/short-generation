@@ -5,7 +5,7 @@ import re
 from typing import Optional
 
 from backend.app.services.clip_matcher import slugify
-from scripts.bulk_sync_r2 import (
+from backend.app.services.r2_sync import (
     compute_fast_hash,
     extract_filename_tags,
     probe_video_metadata,

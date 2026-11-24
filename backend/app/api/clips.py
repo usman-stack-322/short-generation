@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import sys
 import threading
 import time
 from typing import Optional
@@ -14,17 +13,6 @@ import uuid
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from scripts.bulk_sync_r2 import (
-    VIDEO_EXTENSIONS,
-    compute_fast_hash,
-    extract_filename_tags,
-    probe_video_metadata,
-)
 
 from .. import database
 from ..config import get_settings
@@ -44,6 +32,12 @@ from ..schemas import (
 )
 from ..services.clip_matcher import slugify
 from ..services.r2_storage import R2StorageService
+from ..services.r2_sync import (
+    VIDEO_EXTENSIONS,
+    compute_fast_hash,
+    extract_filename_tags,
+    probe_video_metadata,
+)
 from .deps import get_current_owner, verify_worker_token
 
 router = APIRouter(prefix="/api/clips", tags=["clips"])

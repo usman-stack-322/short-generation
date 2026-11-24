@@ -14,7 +14,7 @@ from backend.app.services.clip_matcher import (
     detect_celebrities,
     plan_clip_timeline,
 )
-from scripts.bulk_sync_r2 import probe_video_metadata
+from backend.app.services.r2_sync import probe_video_metadata
 from worker.web_fetcher import fetch_original_clips_for_celebrity
 
 
