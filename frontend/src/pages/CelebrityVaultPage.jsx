@@ -49,20 +49,29 @@ export default function CelebrityVaultPage({ celebrities, onRefresh }) {
   useEffect(() => {
     if (!scanJob || scanJob.status !== 'running') return undefined;
     let cancelled = false;
+    let inFlight = false;
     const timer = window.setInterval(async () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
       try {
         const latest = await getLocalFolderScanStatus(scanJob.scan_id);
         if (cancelled) return;
         setScanJob(latest);
         if (latest.status === 'completed') {
+          window.clearInterval(timer);
           await onRefresh();
+        } else if (latest.status === 'failed') {
+          window.clearInterval(timer);
         }
       } catch (err) {
         if (!cancelled) {
           setScanError(err.message);
+          window.clearInterval(timer);
         }
+      } finally {
+        inFlight = false;
       }
-    }, 1500);
+    }, 4000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

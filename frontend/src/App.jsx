@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { API_BASE, getHealth, listCelebrities, listProjects } from './api/client';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -34,6 +34,10 @@ function StudioShell() {
   const [projects, setProjects] = useState([]);
   const [apiError, setApiError] = useState('');
 
+  const initialLoadedRef = useRef(false);
+  const refreshInFlightRef = useRef(null);
+  const projectsInFlightRef = useRef(null);
+
   const activePage = ROUTE_TO_PAGE[location.pathname] || 'dashboard';
 
   const handleNavigate = useCallback(
@@ -49,22 +53,56 @@ function StudioShell() {
   }, [logout, navigate]);
 
   const refreshAll = useCallback(async () => {
-    try {
-      const [h, celebs, projs] = await Promise.all([
-        getHealth(),
-        listCelebrities(),
-        listProjects(),
-      ]);
-      setHealth(h);
-      setCelebrities(celebs);
-      setProjects(projs);
-      setApiError('');
-    } catch (err) {
-      setApiError(err.message || 'Unable to connect to Backend API.');
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
     }
+    const promise = (async () => {
+      try {
+        const [h, celebs, projs] = await Promise.all([
+          getHealth(),
+          listCelebrities(),
+          listProjects(),
+        ]);
+        setHealth(h);
+        setCelebrities(celebs);
+        setProjects(projs);
+        setApiError('');
+        return true;
+      } catch (err) {
+        setApiError(err.message || 'Unable to connect to Backend API.');
+        return false;
+      } finally {
+        refreshInFlightRef.current = null;
+      }
+    })();
+    refreshInFlightRef.current = promise;
+    return promise;
+  }, []);
+
+  const refreshProjectsOnly = useCallback(async () => {
+    if (projectsInFlightRef.current) {
+      return projectsInFlightRef.current;
+    }
+    const promise = (async () => {
+      try {
+        const projs = await listProjects();
+        setProjects(projs);
+        setApiError('');
+        return true;
+      } catch (err) {
+        setApiError(err.message || 'Unable to connect to Backend API.');
+        return false;
+      } finally {
+        projectsInFlightRef.current = null;
+      }
+    })();
+    projectsInFlightRef.current = promise;
+    return promise;
   }, []);
 
   useEffect(() => {
+    if (initialLoadedRef.current) return;
+    initialLoadedRef.current = true;
     refreshAll();
   }, [refreshAll]);
 
@@ -125,7 +163,14 @@ function StudioShell() {
             />
             <Route
               path="/queue"
-              element={<RenderQueuePage projects={projects} onRefresh={refreshAll} />}
+              element={
+                <RenderQueuePage
+                  projects={projects}
+                  onRefresh={refreshAll}
+                  onPollProjects={refreshProjectsOnly}
+                  hasApiError={Boolean(apiError)}
+                />
+              }
             />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

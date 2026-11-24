@@ -70,10 +70,18 @@ async function requestJson(path, options = {}) {
     }
   }
   if (!response.ok) {
-    const message =
+    const rawMessage =
       (data && (data.detail || data.message)) ||
       `Request failed with HTTP ${response.status}`;
-    throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+    const formattedMessage =
+      response.status === 429
+        ? 'Too many requests (HTTP 429) — automatic refresh paused. Please wait a moment and click Refresh.'
+        : typeof rawMessage === 'string'
+        ? rawMessage
+        : JSON.stringify(rawMessage);
+    const err = new Error(formattedMessage);
+    err.status = response.status;
+    throw err;
   }
   return data;
 }

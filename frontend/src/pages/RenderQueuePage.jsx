@@ -1,16 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Download, RefreshCw, Trash2 } from 'lucide-react';
 import { deleteProject, getProjectVideoUrl } from '../api/client';
 import ModalDialog from '../components/ModalDialog';
 import StatusBadge from '../components/StatusBadge';
 
 const PIPELINE_STEPS = ['script', 'audio', 'clips', 'captions', 'render'];
+const QUEUE_POLL_INTERVAL_MS = 12000;
 
-export default function RenderQueuePage({ projects, onRefresh }) {
+export default function RenderQueuePage({
+  projects,
+  onRefresh,
+  onPollProjects,
+  hasApiError = false,
+}) {
   const [refreshing, setRefreshing] = useState(false);
+  const [pollingPaused, setPollingPaused] = useState(false);
   const [projectToDelete, setProjectToDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const pollInFlightRef = useRef(false);
 
   async function handleConfirmDelete() {
     if (!projectToDelete) return;
@@ -32,14 +40,37 @@ export default function RenderQueuePage({ projects, onRefresh }) {
   );
 
   useEffect(() => {
-    if (!hasActiveJobs) return undefined;
-    const timer = window.setInterval(() => {
-      onRefresh();
-    }, 2500);
+    if (!hasActiveJobs) {
+      setPollingPaused(false);
+      return undefined;
+    }
+    if (hasApiError || pollingPaused) {
+      return undefined;
+    }
+
+    const pollFn = onPollProjects || onRefresh;
+    const timer = window.setInterval(async () => {
+      if (document.hidden || pollInFlightRef.current) return;
+      pollInFlightRef.current = true;
+      try {
+        const ok = await pollFn();
+        if (ok === false) {
+          setPollingPaused(true);
+          window.clearInterval(timer);
+        }
+      } catch {
+        setPollingPaused(true);
+        window.clearInterval(timer);
+      } finally {
+        pollInFlightRef.current = false;
+      }
+    }, QUEUE_POLL_INTERVAL_MS);
+
     return () => window.clearInterval(timer);
-  }, [hasActiveJobs, onRefresh]);
+  }, [hasActiveJobs, hasApiError, pollingPaused, onPollProjects, onRefresh]);
 
   async function handleManualRefresh() {
+    setPollingPaused(false);
     setRefreshing(true);
     try {
       await onRefresh();
@@ -60,10 +91,15 @@ export default function RenderQueuePage({ projects, onRefresh }) {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {hasActiveJobs && (
+          {hasActiveJobs && !pollingPaused && !hasApiError && (
             <span className="inline-flex items-center gap-2 rounded-full border border-[#38BDF8]/30 bg-[#38BDF8]/10 px-3 py-1 text-xs font-medium text-[#38BDF8]">
               <span className="h-2 w-2 animate-pulse rounded-full bg-[#38BDF8]" />
-              Polling every 2.5s
+              Auto-refresh every 12s
+            </span>
+          )}
+          {hasActiveJobs && (pollingPaused || hasApiError) && (
+            <span className="inline-flex items-center gap-2 rounded-full border border-[#F43F5E]/30 bg-[#F43F5E]/10 px-3 py-1 text-xs font-medium text-[#F43F5E]">
+              Auto-refresh paused (error)
             </span>
           )}
           <button

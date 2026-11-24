@@ -284,3 +284,54 @@ def test_cloud_deployment_configs_and_db_normalization():
     assert "rootDir: backend" in render_yaml
     assert "uvicorn app.main:app" in render_yaml
     assert "healthCheckPath: /api/health" in render_yaml
+
+
+def test_cors_headers_on_preflight_401_and_500_errors(monkeypatch):
+    pytest.importorskip("sqlalchemy")
+    from fastapi.testclient import TestClient
+
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["DATABASE_URL"] = f"sqlite:///{tmp}/test_cors_err.db"
+        os.environ["WORKER_SHARED_SECRET"] = "test-secret"
+        os.environ["JWT_SECRET"] = "test-jwt-secret-key-at-least-32-bytes-long"
+        os.environ["STORAGE_MODE"] = "local"
+
+        from backend.app.config import get_settings
+
+        get_settings.cache_clear()
+        from backend.app import database
+
+        database.reconfigure_engine(os.environ["DATABASE_URL"])
+        from backend.app import main as main_mod
+
+        try:
+            with TestClient(main_mod.app, raise_server_exceptions=False) as client:
+                for origin in ("https://www.aishorts.space", "https://aishorts.space"):
+                    preflight = client.options(
+                        "/api/projects",
+                        headers={
+                            "Origin": origin,
+                            "Access-Control-Request-Method": "GET",
+                            "Access-Control-Request-Headers": "authorization",
+                        },
+                    )
+                    assert preflight.status_code == 200
+                    assert preflight.headers.get("access-control-allow-origin") == origin
+
+                    unauth = client.get("/api/projects", headers={"Origin": origin})
+                    assert unauth.status_code == 401
+                    assert unauth.headers.get("access-control-allow-origin") == origin
+
+                monkeypatch.setattr(
+                    main_mod,
+                    "get_settings",
+                    lambda: (_ for _ in ()).throw(RuntimeError("Simulated failure")),
+                )
+                err500 = client.get(
+                    "/api/health",
+                    headers={"Origin": "https://www.aishorts.space"},
+                )
+                assert err500.status_code == 500
+                assert err500.headers.get("access-control-allow-origin") == "https://www.aishorts.space"
+        finally:
+            database.engine.dispose()

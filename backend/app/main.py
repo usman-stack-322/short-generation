@@ -1,11 +1,15 @@
 from contextlib import asynccontextmanager
+import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import database
 from .api import auth, celebrities, clips, projects
 from .config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -29,9 +33,21 @@ allowed_origins = list(dict.fromkeys([*DEFAULT_CORS_ORIGINS, *settings.cors_orig
 
 app = FastAPI(title=settings.app_name, version="2.0.0-phase1", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def catch_unhandled_exceptions(request: Request, call_next):
+    """Catch unexpected errors inside CORSMiddleware so even 500 responses include CORS headers."""
+    try:
+        return await call_next(request)
+    except Exception:
+        logger.exception("Unhandled error processing %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=r"^https://([a-zA-Z0-9-]+\.)?(aishorts\.space|vercel\.app)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
