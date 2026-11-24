@@ -25,9 +25,13 @@ def test_end_to_end_phase1_api_flow():
 
         try:
             with TestClient(app) as client:
-                # 1. Health check (works cleanly in local storage mode without R2 keys)
-                health = client.get("/api/health")
+                # 1. Health check + CORS origins for production Vercel frontend
+                health = client.get("/api/health", headers={"Origin": "https://aishorts.space"})
                 assert health.status_code == 200
+                assert health.headers.get("access-control-allow-origin") == "https://aishorts.space"
+                health_www = client.get("/api/health", headers={"Origin": "https://www.aishorts.space"})
+                assert health_www.status_code == 200
+                assert health_www.headers.get("access-control-allow-origin") == "https://www.aishorts.space"
                 assert health.json()["status"] == "ok"
                 assert health.json()["storage_mode"] == "local"
                 assert health.json()["r2_configured"] is False

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getHealth, listCelebrities, listProjects } from './api/client';
+import { API_BASE, getHealth, listCelebrities, listProjects } from './api/client';
 import Sidebar from './components/Sidebar';
 import CelebrityVaultPage from './pages/CelebrityVaultPage';
 import CreateVideoPage from './pages/CreateVideoPage';
@@ -53,7 +53,7 @@ export default function App() {
         <div className="mx-auto max-w-6xl space-y-6">
           {apiError && (
             <div className="rounded-xl border border-[#F43F5E]/30 bg-[#F43F5E]/10 px-4 py-3 text-xs text-[#F43F5E]">
-              Backend unreachable: {apiError} — confirm FastAPI is running on http://127.0.0.1:8000.
+              Backend unreachable: {apiError} — confirm FastAPI is running at {API_BASE}.
             </div>
           )}
 

@@ -17,12 +17,21 @@ async def lifespan(_app: FastAPI):
         database.engine.dispose()
 
 
+DEFAULT_CORS_ORIGINS = [
+    "https://aishorts.space",
+    "https://www.aishorts.space",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
 settings = get_settings()
+allowed_origins = list(dict.fromkeys([*DEFAULT_CORS_ORIGINS, *settings.cors_origin_list]))
+
 app = FastAPI(title=settings.app_name, version="2.0.0-phase1", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
