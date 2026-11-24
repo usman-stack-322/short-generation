@@ -10,10 +10,21 @@ class Base(DeclarativeBase):
     pass
 
 
+def normalize_database_url(database_url: str) -> str:
+    """Normalize PostgreSQL URLs to use psycopg v3 when the driver suffix is omitted."""
+    url = (database_url or "").strip()
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
+
+
 def build_engine(database_url: str):
-    connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+    normalized_url = normalize_database_url(database_url)
+    connect_args = {"check_same_thread": False} if normalized_url.startswith("sqlite") else {}
     return create_engine(
-        database_url,
+        normalized_url,
         connect_args=connect_args,
         pool_pre_ping=True,
     )

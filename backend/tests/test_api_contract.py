@@ -94,3 +94,39 @@ def test_end_to_end_phase1_api_flow():
                 assert done.json()["status"] == "completed"
         finally:
             database.engine.dispose()
+
+
+def test_cloud_deployment_configs_and_db_normalization():
+    import json
+    from pathlib import Path
+    from backend.app.config import Settings
+    from backend.app.database import normalize_database_url
+
+    assert (
+        normalize_database_url("postgresql://user:pass@ep-host.neon.tech/neondb?sslmode=require")
+        == "postgresql+psycopg://user:pass@ep-host.neon.tech/neondb?sslmode=require"
+    )
+    assert (
+        normalize_database_url("postgres://user:pass@host/db")
+        == "postgresql+psycopg://user:pass@host/db"
+    )
+    assert normalize_database_url("sqlite:///./ai_shorts_v2.db") == "sqlite:///./ai_shorts_v2.db"
+
+    cfg = Settings(
+        api_cors_origins="https://app.vercel.app/, http://localhost:5173/",
+        cors_origins="https://app.vercel.app,https://preview.vercel.app/",
+    )
+    assert cfg.cors_origin_list == [
+        "https://app.vercel.app",
+        "http://localhost:5173",
+        "https://preview.vercel.app",
+    ]
+
+    repo_root = Path(__file__).resolve().parents[2]
+    vercel_cfg = json.loads((repo_root / "frontend" / "vercel.json").read_text(encoding="utf-8"))
+    assert {"source": "/(.*)", "destination": "/index.html"} in vercel_cfg["rewrites"]
+
+    render_yaml = (repo_root / "render.yaml").read_text(encoding="utf-8")
+    assert "rootDir: backend" in render_yaml
+    assert "uvicorn app.main:app" in render_yaml
+    assert "healthCheckPath: /api/health" in render_yaml

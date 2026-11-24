@@ -44,8 +44,8 @@ RENDER_PROFILES: dict[str, RenderProfile] = {
     ),
 }
 
-XFADE_TRANSITIONS: tuple[str, ...] = ("fade", "smoothleft", "wipeleft", "dissolve")
-XFADE_DURATION_SEC: float = 0.25
+XFADE_TRANSITIONS: tuple[str, ...] = ("fade", "smoothleft", "dissolve")
+XFADE_DURATION_SEC: float = 0.30
 
 
 def compute_xfade_schedule(
@@ -59,29 +59,49 @@ def compute_xfade_schedule(
         raise ValueError("Cannot compute xfade schedule without cuts.")
 
     cuts_sum = sum(clean_durs)
-    extra_tail = max(0.0, float(total_duration_sec) - cuts_sum) if total_duration_sec else 0.0
+    target_total = float(total_duration_sec) if total_duration_sec and total_duration_sec > 0 else 0.0
 
     if len(clean_durs) == 1:
-        return [round(clean_durs[0] + extra_tail, 3)], []
+        single_dur = round(target_total, 3) if target_total > 0 else round(clean_durs[0], 3)
+        return [single_dur], []
+
+    if target_total > 0:
+        if cuts_sum > target_total:
+            scale = target_total / cuts_sum
+            adjusted_durs = [round(max(0.2, d * scale), 3) for d in clean_durs]
+            diff = round(target_total - sum(adjusted_durs), 3)
+            if adjusted_durs[-1] + diff >= 0.2:
+                adjusted_durs[-1] = round(adjusted_durs[-1] + diff, 3)
+        else:
+            adjusted_durs = list(clean_durs)
+            extra_tail = round(target_total - cuts_sum, 3)
+            if extra_tail > 0:
+                adjusted_durs[-1] = round(adjusted_durs[-1] + extra_tail, 3)
+    else:
+        adjusted_durs = list(clean_durs)
+
+    if float(transition_sec) <= 0:
+        return [round(d, 3) for d in adjusted_durs], []
 
     boundary_durations: list[float] = []
-    for idx in range(len(clean_durs) - 1):
-        safe_t = min(float(transition_sec), clean_durs[idx] * 0.4, clean_durs[idx + 1] * 0.4)
+    for idx in range(len(adjusted_durs) - 1):
+        safe_t = min(float(transition_sec), adjusted_durs[idx] * 0.4, adjusted_durs[idx + 1] * 0.4)
         boundary_durations.append(round(max(0.05, safe_t), 3))
 
     prep_durations: list[float] = []
-    for idx, base_dur in enumerate(clean_durs):
-        if idx < len(clean_durs) - 1:
+    for idx, base_dur in enumerate(adjusted_durs):
+        if idx < len(adjusted_durs) - 1:
             prep_durations.append(round(base_dur + boundary_durations[idx], 3))
         else:
-            prep_durations.append(round(base_dur + extra_tail, 3))
+            prep_durations.append(round(base_dur, 3))
 
     transitions: list[tuple[str, float, float]] = []
-    cumulative = 0.0
-    for idx in range(len(clean_durs) - 1):
-        cumulative += clean_durs[idx]
+    current_stream_dur = prep_durations[0]
+    for idx, tr_dur in enumerate(boundary_durations):
+        offset = round(max(0.0, current_stream_dur - tr_dur), 3)
         tr_name = XFADE_TRANSITIONS[idx % len(XFADE_TRANSITIONS)]
-        transitions.append((tr_name, boundary_durations[idx], round(cumulative, 3)))
+        transitions.append((tr_name, tr_dur, offset))
+        current_stream_dur = round(offset + prep_durations[idx + 1], 3)
 
     return prep_durations, transitions
 
@@ -111,11 +131,24 @@ def probe_rendered_video(video_path: Path) -> dict:
     v_streams = [s for s in streams if s.get("codec_type") == "video"]
     a_streams = [s for s in streams if s.get("codec_type") == "audio"]
     fmt = data.get("format") or {}
+    fmt_duration = round(float(fmt.get("duration") or 0.0), 3)
+    v_duration = (
+        round(float(v_streams[0].get("duration") or fmt_duration), 3)
+        if v_streams
+        else 0.0
+    )
+    a_duration = (
+        round(float(a_streams[0].get("duration") or fmt_duration), 3)
+        if a_streams
+        else 0.0
+    )
 
     return {
         "width": int(v_streams[0].get("width") or 0) if v_streams else 0,
         "height": int(v_streams[0].get("height") or 0) if v_streams else 0,
-        "duration_sec": round(float(fmt.get("duration") or 0.0), 3),
+        "duration_sec": fmt_duration,
+        "video_duration_sec": v_duration,
+        "audio_duration_sec": a_duration,
         "has_video": bool(v_streams),
         "has_audio": bool(a_streams),
         "video_codec": v_streams[0].get("codec_name") if v_streams else None,
@@ -168,19 +201,24 @@ def render_video(
             raise FileNotFoundError(f"Cut clip file missing on disk: {src}")
         start = max(0.0, float(cut.start_sec))
         cmd.extend(["-ss", f"{start:.3f}", "-t", f"{prep_dur + 0.5:.3f}", "-i", str(src)])
+        pad_duration = max(2.0, prep_dur)
         graph.append(
             f"[{idx}:v]"
             f"scale={profile.width}:{profile.height}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={profile.width}:{profile.height}:(iw-{profile.width})/2:(ih-{profile.height})/2,"
-            f"fps={profile.fps},setsar=1,tpad=stop_mode=clone:stop_duration=2,"
+            f"fps={profile.fps},setsar=1,tpad=stop_mode=clone:stop_duration={pad_duration:.3f},"
             f"trim=duration={prep_dur:.3f},setpts=PTS-STARTPTS,settb=1/{profile.fps},format=yuv420p[v{idx}]"
         )
 
     audio_idx = len(cuts)
     cmd.extend(["-i", str(audio_path.resolve())])
 
-    if not transitions:
+    if len(cuts) == 1:
         video_stream = "v0"
+    elif not transitions:
+        concat_inputs = "".join(f"[v{i}]" for i in range(len(cuts)))
+        graph.append(f"{concat_inputs}concat=n={len(cuts)}:v=1:a=0,format=yuv420p[vcat]")
+        video_stream = "vcat"
     else:
         prev_label = "v0"
         for idx, (tr_name, tr_dur, offset) in enumerate(transitions, start=1):

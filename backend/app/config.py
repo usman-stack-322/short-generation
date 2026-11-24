@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_name: str = "AI Shorts Studio v2"
     storage_mode: str = "local"
     api_cors_origins: str = "http://localhost:5173"
+    cors_origins: str = ""
     default_owner_email: str = "owner@local.studio"
 
     database_url: str = "sqlite:///./ai_shorts_v2.db"
@@ -30,7 +31,9 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> List[str]:
-        return [origin.strip() for origin in self.api_cors_origins.split(",") if origin.strip()]
+        combined = ",".join(part for part in (self.api_cors_origins, self.cors_origins) if part)
+        cleaned = [origin.strip().rstrip("/") for origin in combined.split(",") if origin.strip().rstrip("/")]
+        return list(dict.fromkeys(cleaned))
 
     @property
     def r2_endpoint_url(self) -> str:

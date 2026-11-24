@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: ai-shorts-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: APP_ENV
+        value: production
+      - key: APP_NAME
+        value: AI Shorts Studio v2
+      - key: STORAGE_MODE
+        value: local # Switch to r2 once Cloudflare R2 credentials are configured
+      - key: DEFAULT_OWNER_EMAIL
+        value: owner@local.studio
+      - key: DATABASE_URL
+        sync: false
+      - key: API_CORS_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: WORKER_SHARED_SECRET
+        generateValue: true

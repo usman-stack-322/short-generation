@@ -9,7 +9,7 @@ import pytest
 
 from worker.clip_resolver import ResolvedCut
 from worker.ffmpeg_renderer import probe_rendered_video, render_video
-from worker.script_service import generate_script
+from worker.script_service import ScriptGenerationError, generate_script
 from worker.tts_service import create_ass_from_script
 from worker.web_fetcher import is_allowed_original_video
 
@@ -147,23 +147,37 @@ def test_render_5_second_short_with_synthetic_audio_clips_and_captions():
         assert info["has_audio"] is True
         assert info["file_size_bytes"] > 0
         assert 4.8 <= info["duration_sec"] <= 5.2
+        assert abs(info["video_duration_sec"] - info["audio_duration_sec"]) <= 0.15
 
 
 def test_single_clip_bypasses_xfade_and_schedule_math():
     from worker.ffmpeg_renderer import compute_xfade_schedule
 
-    prep_1, tr_1 = compute_xfade_schedule([2.0], transition_sec=0.25, total_duration_sec=2.0)
+    prep_1, tr_1 = compute_xfade_schedule([2.0], transition_sec=0.30, total_duration_sec=2.0)
     assert prep_1 == [2.0]
     assert tr_1 == []
 
-    prep_5, tr_5 = compute_xfade_schedule([2.0, 2.0, 2.0, 2.0, 2.0], transition_sec=0.25, total_duration_sec=10.0)
-    assert prep_5 == [2.25, 2.25, 2.25, 2.25, 2.0]
+    prep_5, tr_5 = compute_xfade_schedule([2.0, 2.0, 2.0, 2.0, 2.0], total_duration_sec=10.0)
+    assert prep_5 == [2.3, 2.3, 2.3, 2.3, 2.0]
     assert [(name, round(dur, 2), round(off, 2)) for name, dur, off in tr_5] == [
-        ("fade", 0.25, 2.0),
-        ("smoothleft", 0.25, 4.0),
-        ("wipeleft", 0.25, 6.0),
-        ("dissolve", 0.25, 8.0),
+        ("fade", 0.30, 2.0),
+        ("smoothleft", 0.30, 4.0),
+        ("dissolve", 0.30, 6.0),
+        ("fade", 0.30, 8.0),
     ]
+
+    prep_15, tr_15 = compute_xfade_schedule([3.5] * 15, transition_sec=0.30, total_duration_sec=52.5)
+    assert len(tr_15) == 14
+    stream_dur_15 = prep_15[0]
+    for idx, (_name, _tr_dur, off) in enumerate(tr_15):
+        stream_dur_15 = off + prep_15[idx + 1]
+    assert abs(stream_dur_15 - 52.5) <= 0.02
+
+    prep_trim, tr_trim = compute_xfade_schedule([2.0, 2.0, 2.0], transition_sec=0.30, total_duration_sec=5.0)
+    stream_dur_trim = prep_trim[0]
+    for idx, (_name, _tr_dur, off) in enumerate(tr_trim):
+        stream_dur_trim = off + prep_trim[idx + 1]
+    assert abs(stream_dur_trim - 5.0) <= 0.02
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
@@ -188,6 +202,7 @@ def test_single_clip_bypasses_xfade_and_schedule_math():
         assert info["height"] == 1920
         assert info["has_audio"] is True
         assert 1.8 <= info["duration_sec"] <= 2.2
+        assert abs(info["video_duration_sec"] - info["audio_duration_sec"]) <= 0.15
 
 
 def test_script_service_and_web_fetcher_filters():
@@ -198,20 +213,129 @@ def test_script_service_and_web_fetcher_filters():
     )
     assert preserved == "Keep my exact script words here."
 
-    fallback = generate_script(
-        input_type="title",
-        title="Stephen Curry Postgame Reaction",
-        raw_input="",
-        target_duration_sec=50,
-        api_key="your_gemini_api_key",
-    )
-    assert "Stephen Curry Postgame Reaction" in fallback
-    assert "[" not in fallback and "**" not in fallback
-    assert len(fallback.split()) >= 40
-
     assert is_allowed_original_video("Stephen Curry Postgame Interview Warriors") is True
     assert is_allowed_original_video("Stephen Curry AI Generated Sora Concept") is False
     assert is_allowed_original_video("NBA 2K26 Deepfake Parody Clip") is False
+
+
+def test_script_service_raises_on_missing_key_and_provider_error(monkeypatch):
+    with pytest.raises(ScriptGenerationError, match="GEMINI_API_KEY"):
+        generate_script(
+            input_type="title",
+            title="Stephen Curry Postgame Reaction",
+            raw_input="",
+            target_duration_sec=50,
+            api_key="your_gemini_api_key",
+        )
+
+    from google import genai
+
+    fake_secret = "AIzaFakeSecret123456"
+
+    class FailingModels:
+        def generate_content(self, **kwargs):
+            raise RuntimeError(f"429 quota exceeded for {fake_secret}")
+
+    class FailingClient:
+        def __init__(self, api_key: str):
+            self.models = FailingModels()
+
+    monkeypatch.setattr(genai, "Client", FailingClient)
+    with pytest.raises(ScriptGenerationError) as exc_info:
+        generate_script(
+            input_type="title",
+            title="LeBron James Buzzer Beater Breakdown",
+            raw_input="",
+            target_duration_sec=50,
+            api_key=fake_secret,
+        )
+
+    msg = str(exc_info.value)
+    assert "429 quota exceeded" in msg
+    assert fake_secret not in msg
+    assert "[REDACTED]" in msg
+
+
+def test_script_service_generates_distinct_scripts_for_different_titles(monkeypatch):
+    import re
+    from types import SimpleNamespace
+    from google import genai
+
+    captured_calls: list[dict] = []
+
+    class DistinctModels:
+        def generate_content(self, model: str, contents: str, config=None):
+            captured_calls.append({"model": model, "contents": contents, "config": config})
+            match = re.search(r"Title/Topic:\s*(.+)", contents)
+            extracted_title = match.group(1).strip() if match else ""
+            if "LeBron" in extracted_title:
+                text = (
+                    "LeBron James tore apart Golden State down the stretch, scoring forty points on ruthless drives "
+                    "into the paint and deep step-back threes while Warriors defenders scrambled to recover. "
+                    "At this stage of his career, closing out a rival arena like that proves nobody dictates playoff "
+                    "tempo quite like him. Could anyone in the West stop that version of LeBron in a seven game series?"
+                )
+            elif "Jokic" in extracted_title:
+                text = (
+                    "Nikola Jokic had reporters howling after turning a serious postgame podium into a standup routine "
+                    "about rushing home to Serbia for his harness racing horses instead of celebrating a triple double. "
+                    "While teammates chased accolades, the Nuggets center checked stable schedules mid-interview. "
+                    "Does Jokic love horse racing even more than hoarding NBA MVP trophies?"
+                )
+            else:
+                text = f"Unique coverage specifically analyzing {extracted_title}."
+            return SimpleNamespace(text=text)
+
+    class DistinctClient:
+        def __init__(self, api_key: str):
+            self.api_key = api_key
+            self.models = DistinctModels()
+
+    monkeypatch.setattr(genai, "Client", DistinctClient)
+
+    title_a = "LeBron James Drops 40 Points Against Golden State"
+    title_b = "Nikola Jokic Hilarious Press Conference About His Horses"
+
+    script_a = generate_script(
+        input_type="title",
+        title=title_a,
+        raw_input=title_a,
+        target_duration_sec=45,
+        api_key="AIzaTestValidKey00001",
+    )
+    script_b = generate_script(
+        input_type="title",
+        title=title_b,
+        raw_input=title_b,
+        target_duration_sec=45,
+        api_key="AIzaTestValidKey00001",
+    )
+
+    assert len(captured_calls) == 2
+    for call in captured_calls:
+        cfg = call["config"]
+        assert cfg is not None
+        assert 0.85 <= cfg.temperature <= 0.95
+        assert cfg.top_p == 0.95
+        assert cfg.system_instruction
+        assert "Do NOT repeat phrasing" in call["contents"]
+
+    assert title_a in captured_calls[0]["contents"]
+    assert title_b not in captured_calls[0]["contents"]
+    assert title_b in captured_calls[1]["contents"]
+    assert "Extra Context:" not in captured_calls[0]["contents"]
+
+    assert script_a != script_b
+    assert "LeBron" in script_a and "Golden State" in script_a
+    assert "Jokic" in script_b and "horses" in script_b.lower()
+    assert "LeBron" not in script_b and "Jokic" not in script_a
+    assert "Wait until you hear the real story behind" not in script_a
+    assert "Wait until you hear the real story behind" not in script_b
+
+    tokens_a = {w.lower().strip(".,?!") for w in script_a.split()}
+    tokens_b = {w.lower().strip(".,?!") for w in script_b.split()}
+    jaccard = len(tokens_a & tokens_b) / max(1, len(tokens_a | tokens_b))
+    assert jaccard < 0.35
 
 
 def test_video_endpoint_and_mark_clips_used_api():
