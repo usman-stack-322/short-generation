@@ -278,7 +278,15 @@ def test_cloud_deployment_configs_and_db_normalization():
 
     repo_root = Path(__file__).resolve().parents[2]
     vercel_cfg = json.loads((repo_root / "frontend" / "vercel.json").read_text(encoding="utf-8"))
-    assert {"source": "/(.*)", "destination": "/index.html"} in vercel_cfg["rewrites"]
+    rewrites = vercel_cfg["rewrites"]
+    api_rewrite = {
+        "source": "/api/:path*",
+        "destination": "https://short-generation-production.up.railway.app/api/:path*",
+    }
+    spa_rewrite = {"source": "/(.*)", "destination": "/index.html"}
+    assert api_rewrite in rewrites
+    assert spa_rewrite in rewrites
+    assert rewrites.index(api_rewrite) < rewrites.index(spa_rewrite)
 
     render_yaml = (repo_root / "render.yaml").read_text(encoding="utf-8")
     assert "rootDir: backend" in render_yaml

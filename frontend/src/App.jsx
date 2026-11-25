@@ -127,7 +127,7 @@ function StudioShell() {
         <div className="mx-auto max-w-6xl space-y-6">
           {apiError && (
             <div className="rounded-xl border border-[#F43F5E]/30 bg-[#F43F5E]/10 px-4 py-3 text-xs text-[#F43F5E]">
-              Backend unreachable: {apiError} — confirm FastAPI is running at {API_BASE}.
+              Backend unreachable: {apiError} — confirm FastAPI is running at {API_BASE || '/api (Vercel proxy)'}.
             </div>
           )}
 

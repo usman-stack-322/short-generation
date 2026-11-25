@@ -1,10 +1,24 @@
-export const API_BASE = (
-  import.meta.env.VITE_API_URL ||
-  import.meta.env.VITE_API_BASE_URL ||
-  'http://127.0.0.1:8000'
-)
-  .trim()
-  .replace(/\/+$/, '');
+function resolveApiBase() {
+  const explicit = (
+    import.meta.env.VITE_API_URL ||
+    import.meta.env.VITE_API_BASE_URL ||
+    ''
+  )
+    .trim()
+    .replace(/\/+$/, '');
+  if (explicit) {
+    return explicit;
+  }
+  const isProductionHost =
+    typeof window !== 'undefined' &&
+    /(^|\.)aishorts\.space$/i.test(window.location.hostname);
+  if (isProductionHost || import.meta.env.PROD) {
+    return '';
+  }
+  return 'http://127.0.0.1:8000';
+}
+
+export const API_BASE = resolveApiBase();
 
 export const AUTH_TOKEN_KEY = 'ai_shorts_auth_token';
 
